@@ -21,7 +21,7 @@ POSITIVE_EVENTS = [
     (('并购', '重组', '资产收购', '控制权变更'), '并购重组', 19),
     (('股权激励', '员工持股'), '激励计划', 13),
 ]
-NEGATIVE_WORDS = ('减持', '立案', '调查', '处罚', '问询函', '风险提示', '终止', '亏损', '业绩预减', '退市', '诉讼', '冻结', '质押')
+NEGATIVE_WORDS = ('减持', '立案', '调查', '处罚', '问询函', '风险提示', '终止', '亏损', '业绩预减', '退市', '诉讼', '冻结', '质押', '解禁', '解除限售', '限售股份上市流通', '限售股上市流通')
 
 def request_json(url, params, retries=3):
     error = None
@@ -49,14 +49,12 @@ def classify_event(title):
 
 def fetch_announcements(now):
     result = []
+    risks = {}
     for page in range(1, 5):
         payload = request_json(ANN_URL, {'sr': -1, 'page_size': 100, 'page_index': page, 'ann_type': 'A', 'client_source': 'web', 'f_node': 0, 's_node': 0})
         rows = payload.get('data', {}).get('list') or []
         for ann in rows:
             title = ann.get('title_ch') or ann.get('title') or ''
-            event = classify_event(title)
-            if not event:
-                continue
             raw_time = (ann.get('display_time') or ann.get('notice_date') or '')[:19]
             try:
                 published = dt.datetime.fromisoformat(raw_time).replace(tzinfo=TZ)
@@ -65,15 +63,23 @@ def fetch_announcements(now):
             age_hours = max(0, (now - published).total_seconds() / 3600)
             if age_hours > 120:
                 continue
+            codes = [(str(stock.get('stock_code') or ''), stock.get('short_name') or '') for stock in ann.get('codes') or []]
+            if any(word in title for word in NEGATIVE_WORDS):
+                for code, name in codes:
+                    if a_share(code):
+                        risks.setdefault(code, {'code': code, 'name': name, 'riskTitles': []})['riskTitles'].append(title)
+                continue
+            event = classify_event(title)
+            if not event:
+                continue
             decay = max(.35, 1 - age_hours / 168)
             label, base = event
-            for stock in ann.get('codes') or []:
-                code = str(stock.get('stock_code') or '')
+            for code, name in codes:
                 if a_share(code):
-                    result.append({'code': code, 'name': stock.get('short_name') or '', 'eventType': label, 'eventTitle': title, 'eventPublishedAt': published.isoformat(), 'eventAgeHours': round(age_hours, 1), 'eventScore': round(base * decay, 2), 'announcementId': ann.get('art_code') or ''})
+                    result.append({'code': code, 'name': name, 'eventType': label, 'eventTitle': title, 'eventPublishedAt': published.isoformat(), 'eventAgeHours': round(age_hours, 1), 'eventScore': round(base * decay, 2), 'announcementId': ann.get('art_code') or ''})
         if len(rows) < 100:
             break
-    return result
+    return result, risks
 
 def fetch_limit_pool(now):
     payload = request_json(LIMIT_URL, {'ut': '7eea3edcaed734bea9cbfc24409ed989', 'dpt': 'wz.ztzt', 'Pageindex': 0, 'pagesize': 500, 'sort': 'fbt:asc', 'date': now.strftime('%Y%m%d')})
@@ -93,11 +99,14 @@ def fetch_limit_pool(now):
         rows.append({'code': code, 'name': x.get('n') or '', 'limitUp': True, 'limitDate': str(data.get('qdate') or ''), 'limitBoards': boards, 'limitBreaks': breaks, 'limitFirstTime': str(x.get('fbt') or ''), 'limitLastTime': str(x.get('lbt') or ''), 'limitTurnover': turnover, 'limitAmount': float(x.get('amount') or 0), 'limitSealAmount': seal_amount, 'limitSealRatio': round(seal_ratio, 3), 'limitScore': round(max(0, min(40, quality)), 2), 'sector': x.get('hybk') or ''})
     return rows, str(data.get('qdate') or '')
 
-def merge_candidates(announcements, limits):
+def merge_candidates(announcements, limits, risks):
     merged = {}
     for row in limits:
-        merged[row['code']] = dict(row, events=[])
+        if row['code'] not in risks:
+            merged[row['code']] = dict(row, events=[])
     for row in announcements:
+        if row['code'] in risks:
+            continue
         stock = merged.setdefault(row['code'], {'code': row['code'], 'name': row['name'], 'limitUp': False, 'limitScore': 0, 'events': []})
         stock['events'].append(row)
         if not stock.get('name'):
@@ -142,17 +151,17 @@ def main():
         raise SystemExit('weekend: no collection')
     if not args.no_wait and not args.debug:
         now = wait_until_0850(now)
-    announcements = fetch_announcements(now)
+    announcements, risks = fetch_announcements(now)
     limits, limit_date = fetch_limit_pool(now)
-    candidates = merge_candidates(announcements, limits)
+    candidates = merge_candidates(announcements, limits, risks)
     if not candidates:
         raise RuntimeError('no premarket candidates collected')
-    payload = {'schemaVersion': 1, 'tradeDate': now.date().isoformat(), 'timezone': 'Asia/Shanghai', 'generatedAt': dt.datetime.now(TZ).isoformat(), 'source': 'Eastmoney announcements + latest limit-up pool', 'debug': bool(args.debug), 'limitPoolDate': limit_date, 'candidateCount': len(candidates), 'candidates': candidates}
+    payload = {'schemaVersion': 1, 'tradeDate': now.date().isoformat(), 'timezone': 'Asia/Shanghai', 'generatedAt': dt.datetime.now(TZ).isoformat(), 'source': 'Eastmoney announcements + latest limit-up pool', 'debug': bool(args.debug), 'limitPoolDate': limit_date, 'riskExcludedCount': len(risks), 'candidateCount': len(candidates), 'candidates': candidates}
     output = Path(args.output)
     write_payload(output, payload)
     if not args.debug:
         write_payload(output.parent / f'{now.date().isoformat()}.json', payload)
-    print(json.dumps({'output': str(output), 'announcements': len(announcements), 'limitUps': len(limits), 'candidates': len(candidates), 'limitPoolDate': limit_date}, ensure_ascii=False))
+    print(json.dumps({'output': str(output), 'announcements': len(announcements), 'riskExcluded': len(risks), 'limitUps': len(limits), 'candidates': len(candidates), 'limitPoolDate': limit_date}, ensure_ascii=False))
 
 if __name__ == '__main__':
     main()

@@ -43,10 +43,13 @@ test('14:30, 14:50 and after close preserve every factor and rank; only live per
   r.run('mainOnly=true;loadCloseLiveChanges=async()=>[]');await r.run('refresh()');assert.equal(r.run('stocks[0].currentChange'),10);assert.deepEqual(frozenFields(r),before);
 });
 
-test('missing close snapshot never rescreens; official cache survives offline and expires next date', async () => {
-  const r=runtimeAt('14:50:00');r.run('loadMarket=async()=>{throw Error("MUST NOT RESCREEN")};prepareCloseScores=()=>{throw Error("MUST NOT RESCORE")}');
-  await r.run('refresh()');assert.equal(r.run('stocks.length'),0);assert.match(r.elements.get('dataNote').textContent,/缺少14:30/);
-  r.context.fixture=fixture(r);r.run('localStorage.setItem(closeCacheKey(),JSON.stringify(fixture))');await r.run('refresh()');assert.equal(r.run('stocks.length'),2);
+test('missing close snapshot recovers once locally; official cache still wins and expires next date', async () => {
+  const r=runtimeAt('14:50:00');
+  const market=Array.from({length:8},(_,i)=>({code:String(600001+i),name:'补算'+i,sector:'测试',currentChange:i===7?10:1,amount:1e8,volume:1,turnover:1,mainFlow:1e7+i*1e6,flowRatio:i+1,speed:1,fiveMin:1,bigBuyCount:1,bigBuyVolume:1e6,anomalyScore:80,signals:[],trend:[10,10,10,10,10],sectorScore:50,marketScore:50,pressure:50,windowChange:0,windowVolume:1}));
+  r.context.market=market;r.run("let recoveryLoads=0;loadSignalCandidates=async()=>{recoveryLoads++;return structuredClone(market)};loadWindow=async s=>({...s,windowChange:.2+s.flowRatio/100,windowEndChange:1,windowVolume:2,trend:[10,10.01,10.02,10.03,10.04]})");
+  await r.run('refresh()');assert.equal(r.run('stocks.length'),5);assert.ok(r.run('stocks.every(s=>s.recoveredClose&&!s.frozenClose)'));assert.match(r.elements.get('dataNote').textContent,/本机于/);assert.match(r.elements.get('sourceMode').textContent,/本机补算/);assert.equal(r.run('recoveryLoads'),1);
+  const first=frozenFields(r);r.run('loadSignalCandidates=async()=>{throw Error("MUST NOT RECALCULATE")};stocks=[]');await r.run('refresh()');assert.deepEqual(frozenFields(r),first);assert.equal(r.run('recoveryLoads'),1);
+  r.context.fixture=fixture(r);r.run('localStorage.setItem(closeCacheKey(),JSON.stringify(fixture));stocks=[]');await r.run('refresh()');assert.equal(r.run('stocks.length'),2);assert.ok(r.run('stocks.every(s=>s.frozenClose)'));assert.doesNotMatch(r.elements.get('sourceMode').textContent,/本机补算/);
   assert.notEqual(r.run('closeCacheKey()'),r.run('frozenCacheKey()'));
   r.setTime('2026-09-08T14:50:00+08:00');await r.run('refresh()');assert.equal(r.run('stocks.length'),0);
 });
@@ -54,8 +57,16 @@ test('missing close snapshot never rescreens; official cache survives offline an
 test('pre-14:30 is unavailable; pending and valid zero-pick results have distinct messages', async () => {
   const r=runtimeAt('14:29:59');await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/14:30后开放/);
   r.setTime('14:30:05');await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/尚未发布/);
+  r.setTime('14:34:59');r.run('loadSignalCandidates=async()=>{throw Error("MUST NOT RECOVER BEFORE 14:35")}');await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/尚未发布/);
   const f=fixture(r);f.universes.main.picks=[];f.universes.all.picks=[];
   r.context.fetch=async()=>({ok:true,json:async()=>f});await r.run('refresh()');assert.equal(r.run('stocks.length'),0);assert.match(r.elements.get('dataNote').textContent,/当日无达标/);
+});
+
+test('failed local minute recovery is not cached and can retry on the next refresh', async () => {
+  const r=runtimeAt('14:50:00'),market=Array.from({length:20},(_,i)=>({code:String(600001+i),name:'重试'+i,sector:'测试',currentChange:1,mainFlow:1e7,flowRatio:2,bigBuyCount:1,anomalyScore:80,signals:[]}));
+  r.context.market=market;r.run("let attempts=0;loadSignalCandidates=async()=>structuredClone(market);loadWindow=async()=>{attempts++;throw Error('offline')}");
+  await r.run('refresh()');assert.equal(r.run('stocks.length'),0);assert.match(r.elements.get('dataNote').textContent,/分时覆盖不足/);assert.equal(r.run('localStorage.getItem(recoveredCloseCacheKey())'),null);
+  await r.run('refresh()');assert.equal(r.run('attempts'),40);assert.equal(r.run('localStorage.getItem(recoveredCloseCacheKey())'),null);
 });
 
 test('invalid or late snapshots are rejected, including duplicate and unmarked picks', () => {

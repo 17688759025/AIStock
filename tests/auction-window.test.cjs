@@ -34,12 +34,14 @@ test('Shanghai trading-minute windows across opening and lunch', () => {
   const cases = [
     ['09:31:00',1,'09:30–09:31'], ['09:35:00',5,'09:30–09:35'], ['09:59:00',29,'09:30–09:59'],
     ['10:00:00',30,'09:30–10:00'], ['11:30:00',30,'11:00–11:30'],
-    ['13:00:00',30,'11:00–11:30'], ['13:05:00',30,'11:05–11:30 + 13:00–13:05'],
-    ['13:30:00',30,'13:00–13:30'], ['15:00:00',30,'14:30–15:00'],
+    ['11:34:00',30,'11:00–11:30'], ['12:59:00',30,'11:00–11:30'], ['13:00:00',30,'11:00–11:30'],
+    ['13:05:00',30,'11:05–11:30 + 13:00–13:05'], ['13:30:00',30,'13:00–13:30'],
+    ['15:00:00',30,'14:30–15:00'], ['15:34:00',30,'14:30–15:00'],
   ];
   r.run("mode='intraday'");
   for (const [time, duration, label] of cases) { r.setTime(time); const w = r.run('tradingWindow()'); assert.equal(w.duration,duration); assert.equal(w.label,label); assert.equal(r.run('allowed()'),true); }
-  for (const time of ['09:25:00','09:30:00','11:31:00','12:59:00','15:01:00']) { r.setTime(time); assert.equal(r.run('allowed()'),false); }
+  for (const time of ['09:25:00','09:30:00']) { r.setTime(time); assert.equal(r.run('allowed()'),false); }
+  for (const time of ['11:34:00','12:59:00','15:34:00']) { r.setTime(time); assert.equal(r.run('tradingWindow().paused'),true); }
   r.setTime('2026-09-07T01:35:00Z'); assert.equal(r.run('hhmm()'),935);
 });
 
@@ -58,6 +60,16 @@ test('13:00 and 13:05 join morning points and exclude lunch/future data', () => 
   assert.equal(r.run('inTradingWindow(12*60)'),false);assert.equal(r.run('inTradingWindow(11*60+10)'),true);assert.equal(r.run('inTradingWindow(13*60+6)'),false);
   r.context.series=points(0,120);assert.throws(()=>r.run("applyWindow({signals:[]},series,'intraday',100)"),/不完整/);
   r.context.series=points(121,125);assert.throws(()=>r.run("applyWindow({signals:[]},series,'intraday',100)"),/不完整/);
+});
+
+test('11:34 lunch refresh uses today 11:00–11:30 and never previous-day data', () => {
+  const r=runtimeAt('11:34:00');
+  r.context.series=[...points(0,120).map(p=>({...p,date:'2026-09-04',close:999})),...points(0,120)];
+  const s=r.run("activeWindow=tradingWindow();applyWindow({signals:[]},series,'intraday',100)");
+  assert.equal(s.windowLabel,'11:00–11:30');assert.equal(s.windowMinutes,30);assert.equal(s.trend.at(-1),220);
+  assert.equal(r.run('activeWindow.asOf'),690);assert.equal(r.run('inTradingWindow(11*60+30)'),true);assert.equal(r.run('inTradingWindow(13*60)'),false);
+  r.context.series=points(0,120).map(p=>({...p,date:'2026-09-04'}));
+  assert.throws(()=>r.run("applyWindow({signals:[]},series,'intraday',100)"),/不完整/);
 });
 
 test('missing intraday minutes are not replaced with previous-day points', () => {

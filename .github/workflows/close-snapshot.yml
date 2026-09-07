@@ -2,8 +2,11 @@ name: Close snapshot collector
 
 on:
   schedule:
-    # 14:10 / 14:20 Shanghai: start early and wait for 14:30.
-    - cron: '10,20 6 * * 1-5'
+    # GitHub scheduled runs can be delayed by hours. Wake from 08:45 Shanghai
+    # onward and let the first runner stay alive until the strict 14:30 minute.
+    # Later schedules are fallbacks; concurrency keeps only one running job.
+    - cron: '45 0,2,4 * * 1-5'
+    - cron: '0,10,20 6 * * 1-5'
   workflow_dispatch:
     inputs:
       debug:
@@ -22,7 +25,9 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # An on-time 08:45 run waits 5h45m before capture. GitHub's hosted-job
+    # maximum is six hours, so setup and the 14:30 calculation still fit.
+    timeout-minutes: 360
     env:
       TZ: Asia/Shanghai
     steps:

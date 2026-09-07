@@ -1,6 +1,6 @@
 # AIStock
 
-页面入口为 `bid-compass.html`。
+实时页面入口为 `bid-compass.html`，尾盘狙击历史入口为 `close-history.html`，两页可以互相跳转。
 
 ## 竞价结果
 
@@ -42,6 +42,10 @@ GitHub Actions 在北京时间工作日 14:10、14:20 提前唤起任务，等�
 4. 14:35 前完成计算，一次性保存 `data/close/YYYY-MM-DD.result.json`；已存在的日期文件不能覆盖。页面优先读取 GitHub 原始文件，也可读取 Pages 副本，两者对应同一份结果。首次在 14:50 打开、换浏览器、切换板块、再次刷新，都不重新筛选。
 5. **只有“实时涨跌”列继续刷新**，不会反过来影响冻结名单、资金、评分和排序。实时接口失败时保留已有值；即使入选股票后来涨停，也不从已经冻结的历史名单中删除。未入选时的涨停剔除规则不变。
 
+正式快照同时更新 `data/close/index.json`，供历史页面发现各日期文件。快照里的 `snapshotPrice` 和 `snapshotChange` 分别保存 14:30 实采价格与当时涨幅；旧文件缺少价格时，历史页和结算脚本可用“前收 ×（1 + 当时涨幅）”还原。
+
+另一个 GitHub Actions 在北京时间工作日 15:10 运行 `scripts/update_close_history.cjs`。它对尚未结算的快照查找市场的下一实际交易日（自动跨周末、节假日），读取该日收盘后确定的未复权最高价，并一次性写入不可覆盖的 `data/close-history/YYYY-MM-DD.json`。日线使用东方财富，失败时切换腾讯，并在个股记录里保存实际来源。收益口径固定为 `下一交易日最高价 / 14:30快照价 - 1`；停牌或个股日线缺失会标记为未取得，不计入汇总比例。`data/close-history/index.json` 只负责日期发现。
+
 采集任务错过 14:30 分钟、报价覆盖不足或分时全部失败时，不生成伪造的空结果，也不在 14:50 补采并标成 14:30。网页显示“尚未发布 / 缺少正式快照”；有效数据筛选后确实无达标股票，则显示“当日无达标股票”。任务完成、推送和 Pages 部署需要时间，因此结果通常晚于 14:30 可见，GitHub 定时任务不保证准点执行。`--debug` 只输出 `/tmp/close-result-debug.json`，不能作为正式快照使用。
 
 ## 验证
@@ -52,6 +56,7 @@ Node.js 22 或以上，无需安装运行依赖：
 node --test tests/*.test.cjs
 node --check scripts/collect_auction_result.cjs
 node --check scripts/collect_close_result.cjs
+node --check scripts/update_close_history.cjs
 ```
 
 测试使用隔离的模拟行情和时钟，验证冻结、跨浏览器读取、缓存日期、时间窗口及收集器。测试通过不代表实际交易日 GitHub 定时采集或公开接口可用性已经验证。

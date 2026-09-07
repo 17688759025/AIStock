@@ -1,0 +1,47 @@
+name: Close sniper next-day settlement
+
+on:
+  schedule:
+    # 15:10 Shanghai. The day's high is final before settling the prior snapshot.
+    - cron: '10 7 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: close-history-settlement
+  cancel-in-progress: false
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify snapshot and settlement logic
+        run: node --test tests/*.test.cjs
+      - name: Settle next-trading-day highs
+        run: node scripts/update_close_history.cjs
+      - name: Publish immutable daily evaluations
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          mkdir -p data/close-history
+          git add data/close-history
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Settle close sniper history $(date +%F)"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin main; then exit 0; fi
+            sleep 2
+          done
+          exit 1

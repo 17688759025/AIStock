@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { createRuntime } = require('../scripts/page-runtime.cjs');
-const { assertCloseCaptureTime, collectEvents, freshQuote, collectCloseInputs, buildCloseResult } = require('../scripts/collect_close_result.cjs');
+const { assertCloseCaptureTime, collectEvents, freshQuote, collectCloseInputs, buildCloseResult, updateCloseIndex } = require('../scripts/collect_close_result.cjs');
 const DATE = '2026-09-07';
 const ms = time => Date.parse(`${DATE}T${time}+08:00`);
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -92,9 +95,19 @@ test('input collector requotes source candidates inside capture minute and recor
   const r=runtimeAt(),rows=Array.from({length:50},(_,i)=>({f12:String(600000+i),f14:'测试'+i,f2:10,f18:10,f17:10,f3:-1,f6:1e8,f10:1,f8:1,f62:1e7,f184:3,f22:1,f124:ms('14:30:12')/1000}));
   const request=async url=>url.includes('getAllStockChanges')?{data:{tc:1000,allstock:[]}}:{data:{diff:rows}};
   const inputs=await collectCloseInputs(r,request,DATE);assert.equal(inputs.rows.length,50);assert.equal(inputs.coverage.rankingPages,3);assert.equal(inputs.coverage.eventComplete,false);
-  assert.ok(inputs.rows.every(s=>s.mainFlow===1e7&&s.currentChange===-1&&s.quoteTime===ms('14:30:12')&&s.signals.includes('14:30异动接口缺失')));
+  assert.ok(inputs.rows.every(s=>s.mainFlow===1e7&&s.currentChange===-1&&s.snapshotPrice===10&&s.snapshotChange===-1&&s.quoteTime===ms('14:30:12')&&s.signals.includes('14:30异动接口缺失')));
   const stale=async url=>url.includes('getAllStockChanges')?{data:{tc:0,allstock:[]}}:{data:{diff:rows.map(s=>({...s,f124:ms('14:50:00')/1000}))}};
   await assert.rejects(()=>collectCloseInputs(r,stale,DATE),/stale/);
+});
+
+test('close result index is date sorted and stable when rebuilt', () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'aistock-close-index-')),dir=path.join(root,'data','close');fs.mkdirSync(dir,{recursive:true});
+  try{
+    fs.writeFileSync(path.join(dir,'2026-09-05.result.json'),JSON.stringify({generatedAt:'2026-09-05T06:31:00Z'}));
+    fs.writeFileSync(path.join(dir,'2026-09-07.result.json'),JSON.stringify({generatedAt:'2026-09-07T06:31:00Z'}));
+    const first=updateCloseIndex(root),content=fs.readFileSync(first.output,'utf8');assert.deepEqual(JSON.parse(content).dates,['2026-09-07','2026-09-05']);
+    updateCloseIndex(root);assert.equal(fs.readFileSync(first.output,'utf8'),content);
+  }finally{fs.rmSync(root,{recursive:true,force:true})}
 });
 
 test('collector uses unchanged close weights, freezes both scopes and permits green-price money inflows', async () => {

@@ -15,6 +15,19 @@ const instant = (date, time) => Date.parse(`${date}T${time}+08:00`);
 const day = (now = new Date()) => new Date(+now + 8 * 3600000).toISOString().slice(0, 10);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+function updateCloseIndex(root = ROOT) {
+  const dir = path.join(root, 'data', 'close');
+  fs.mkdirSync(dir, { recursive: true });
+  const dates = fs.readdirSync(dir).map(name => name.match(/^(\d{4}-\d{2}-\d{2})\.result\.json$/)?.[1]).filter(Boolean).sort().reverse();
+  let updatedAt = null;
+  for (const date of dates) {
+    try { const value = JSON.parse(fs.readFileSync(path.join(dir, `${date}.result.json`), 'utf8')); if (value.generatedAt && (!updatedAt || value.generatedAt > updatedAt)) updatedAt = value.generatedAt; } catch {}
+  }
+  const output = path.join(dir, 'index.json'), content = JSON.stringify({ schemaVersion: 1, updatedAt, dates }, null, 2) + '\n';
+  if (!fs.existsSync(output) || fs.readFileSync(output, 'utf8') !== content) fs.writeFileSync(output, content);
+  return { output, dates };
+}
+
 function assertCloseCaptureTime(now, date) {
   if (!Number.isFinite(+now) || +now < instant(date, '14:30:00') || +now >= instant(date, '14:31:00')) {
     throw new Error('Missed the 14:30 capture minute; later quotes cannot replace the frozen result');
@@ -85,6 +98,7 @@ async function collectCloseInputs(runtime, request, date, debug = false) {
   runtime.context.closeQuoteRows = fresh;runtime.context.closeSeeds = seeds;
   const rows = runtime.run(`(()=>{const quotes=new Map(normalize(closeQuoteRows).map(s=>[s.code,s])),raw=new Map(closeQuoteRows.map(s=>[String(s.f12),s]));return closeSeeds.filter(s=>quotes.has(s.code)).map(s=>({...s,...quotes.get(s.code),
    anomalyScore:s.anomalyScore,bigBuyCount:s.bigBuyCount||0,bigBuyVolume:s.bigBuyVolume||0,
+   snapshotPrice:Number(raw.get(s.code).f2),snapshotChange:Number(raw.get(s.code).f3),
    quoteTime:Number(raw.get(s.code).f124)*1000,
    flowDataReady:Number.isFinite(raw.get(s.code).f62)&&Number.isFinite(raw.get(s.code).f184),
    signals:[...s.signals,...(${!eventResult}?['14:30异动接口缺失']:[])]
@@ -121,7 +135,7 @@ async function buildCloseResult(runtime, inputs, meta) {
 async function main() {
   const debug=process.argv.includes('--debug'),date=day();
   const output=debug?'/tmp/close-result-debug.json':path.join(ROOT,'data','close',`${date}.result.json`);
-  if(!debug&&fs.existsSync(output)){console.log('Already frozen:',output);return;}
+  if(!debug&&fs.existsSync(output)){updateCloseIndex();console.log('Already frozen:',output);return;}
   if(!debug){
     const weekday=new Date(instant(date,'12:00:00')).getUTCDay();if(weekday===0||weekday===6){console.log('Weekend: no result');return;}
     if(Date.now()>=instant(date,'14:31:00'))throw Error('14:30 snapshot missed; no later reconstruction');
@@ -139,10 +153,10 @@ async function main() {
   result.generatedAt=new Date().toISOString();result.debug=debug;result.snapshotId=crypto.createHash('sha256').update(JSON.stringify(result)).digest('hex');
   if(!debug){
     if(Date.now()>=instant(date,'14:35:00'))throw Error('Missed result generation deadline');
-    runtime.context.builtClose=result;runtime.run('validateFrozenClose(builtClose)');writeOnce(output,result);
+    runtime.context.builtClose=result;runtime.run('validateFrozenClose(builtClose)');writeOnce(output,result);updateCloseIndex();
   }else fs.writeFileSync(output,JSON.stringify(result));
   console.log(JSON.stringify({output,snapshotId:result.snapshotId,coverage:inputs.coverage,counts:Object.fromEntries(Object.entries(result.universes).map(([k,v])=>[k,{candidates:v.scannedCount,minuteReady:v.minuteReady,picks:v.picks.length}]))}));
 }
 
-module.exports={assertCloseCaptureTime,collectEvents,freshQuote,collectCloseInputs,buildCloseResult};
+module.exports={assertCloseCaptureTime,collectEvents,freshQuote,collectCloseInputs,buildCloseResult,updateCloseIndex};
 if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1});

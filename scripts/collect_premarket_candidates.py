@@ -60,7 +60,9 @@ def fetch_announcements(now):
                 published = dt.datetime.fromisoformat(raw_time).replace(tzinfo=TZ)
             except ValueError:
                 continue
-            age_hours = max(0, (now - published).total_seconds() / 3600)
+            if published > now:
+                continue
+            age_hours = (now - published).total_seconds() / 3600
             if age_hours > 120:
                 continue
             codes = [(str(stock.get('stock_code') or ''), stock.get('short_name') or '') for stock in ann.get('codes') or []]
@@ -81,9 +83,22 @@ def fetch_announcements(now):
             break
     return result, risks
 
+def previous_trading_date(now):
+    payload = request_json('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
+                           {'param': 'sh000001,day,,,30,qfq'})
+    data = (payload.get('data') or {}).get('sh000001') or {}
+    dates = [dt.date.fromisoformat(row[0]) for row in (data.get('day') or data.get('qfqday') or [])]
+    dates = [date for date in dates if date < now.date()]
+    if not dates:
+        raise RuntimeError('previous trading date unavailable')
+    return max(dates)
+
 def fetch_limit_pool(now):
-    payload = request_json(LIMIT_URL, {'ut': '7eea3edcaed734bea9cbfc24409ed989', 'dpt': 'wz.ztzt', 'Pageindex': 0, 'pagesize': 500, 'sort': 'fbt:asc', 'date': now.strftime('%Y%m%d')})
+    expected = previous_trading_date(now).strftime('%Y%m%d')
+    payload = request_json(LIMIT_URL, {'ut': '7eea3edcaed734bea9cbfc24409ed989', 'dpt': 'wz.ztzt', 'Pageindex': 0, 'pagesize': 500, 'sort': 'fbt:asc', 'date': expected})
     data = payload.get('data') or {}
+    if str(data.get('qdate') or '').replace('-', '') != expected or not isinstance(data.get('pool'), list):
+        raise RuntimeError('previous trading day limit pool missing or wrong date')
     rows = []
     for x in data.get('pool') or []:
         code = str(x.get('c') or '')
@@ -140,6 +155,10 @@ def write_payload(output, payload):
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
 
+def assert_premarket_time(now):
+    if now.time() >= dt.time(9, 25):
+        raise RuntimeError('missed premarket deadline 09:25; refusing late publication')
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', default='data/premarket/latest.json')
@@ -151,12 +170,30 @@ def main():
         raise SystemExit('weekend: no collection')
     if not args.no_wait and not args.debug:
         now = wait_until_0850(now)
+    dated_output = Path(args.output).parent / f'{now.date().isoformat()}.json'
+    if not args.debug:
+        if dated_output.exists():
+            print('Dated premarket file already exists; preserving it')
+            return
+        assert_premarket_time(now)
     announcements, risks = fetch_announcements(now)
-    limits, limit_date = fetch_limit_pool(now)
+    limit_error = None
+    try:
+        limits, limit_date = fetch_limit_pool(now)
+    except Exception as exc:
+        limits, limit_date = [], None
+        limit_error = str(exc)
+        print('Previous-session limit pool unavailable; using announcements only:', limit_error)
     candidates = merge_candidates(announcements, limits, risks)
     if not candidates:
         raise RuntimeError('no premarket candidates collected')
-    payload = {'schemaVersion': 1, 'tradeDate': now.date().isoformat(), 'timezone': 'Asia/Shanghai', 'generatedAt': dt.datetime.now(TZ).isoformat(), 'source': 'Eastmoney announcements + latest limit-up pool', 'debug': bool(args.debug), 'limitPoolDate': limit_date, 'riskExcludedCount': len(risks), 'candidateCount': len(candidates), 'candidates': candidates}
+    generated = dt.datetime.now(TZ)
+    if not args.debug:
+        assert_premarket_time(generated)
+    payload = {'schemaVersion': 1, 'tradeDate': now.date().isoformat(), 'timezone': 'Asia/Shanghai', 'generatedAt': generated.isoformat(), 'source': 'Eastmoney announcements + previous trading day limit-up pool', 'debug': bool(args.debug), 'limitPoolDate': limit_date, 'riskExcludedCount': len(risks), 'candidateCount': len(candidates), 'candidates': candidates}
+    payload['sourceCoverage'] = {'announcements': True, 'previousLimitPool': limit_error is None, 'limitPoolError': limit_error}
+    if limit_error:
+        payload['source'] = 'Eastmoney announcements; previous trading day limit pool unavailable'
     output = Path(args.output)
     write_payload(output, payload)
     if not args.debug:

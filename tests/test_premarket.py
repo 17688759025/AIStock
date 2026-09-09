@@ -11,10 +11,9 @@ spec.loader.exec_module(p)
 
 class PremarketTests(unittest.TestCase):
     def test_deadline(self):
-        p.assert_premarket_time(dt.datetime(2026, 9, 9, 9, 24, 59, tzinfo=p.TZ))
+        self.assertEqual(p.observation_status(dt.datetime(2026, 9, 9, 9, 24, 59, tzinfo=p.TZ)), 'premarket')
         for hour, minute in [(9, 25), (13, 7)]:
-            with self.assertRaises(RuntimeError):
-                p.assert_premarket_time(dt.datetime(2026, 9, 9, hour, minute, tzinfo=p.TZ))
+            self.assertEqual(p.observation_status(dt.datetime(2026, 9, 9, hour, minute, tzinfo=p.TZ)), 'delayed')
 
     def test_previous_session_not_today_or_weekend(self):
         now = dt.datetime(2026, 9, 7, 8, 50, tzinfo=p.TZ)

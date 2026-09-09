@@ -155,9 +155,8 @@ def write_payload(output, payload):
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
 
-def assert_premarket_time(now):
-    if now.time() >= dt.time(9, 25):
-        raise RuntimeError('missed premarket deadline 09:25; refusing late publication')
+def observation_status(now):
+    return 'delayed' if now.time() >= dt.time(9, 25) else 'premarket'
 
 def main():
     parser = argparse.ArgumentParser()
@@ -175,7 +174,6 @@ def main():
         if dated_output.exists():
             print('Dated premarket file already exists; preserving it')
             return
-        assert_premarket_time(now)
     announcements, risks = fetch_announcements(now)
     limit_error = None
     try:
@@ -185,13 +183,11 @@ def main():
         limit_error = str(exc)
         print('Previous-session limit pool unavailable; using announcements only:', limit_error)
     candidates = merge_candidates(announcements, limits, risks)
-    if not candidates:
-        raise RuntimeError('no premarket candidates collected')
     generated = dt.datetime.now(TZ)
-    if not args.debug:
-        assert_premarket_time(generated)
     payload = {'schemaVersion': 1, 'tradeDate': now.date().isoformat(), 'timezone': 'Asia/Shanghai', 'generatedAt': generated.isoformat(), 'source': 'Eastmoney announcements + previous trading day limit-up pool', 'debug': bool(args.debug), 'limitPoolDate': limit_date, 'riskExcludedCount': len(risks), 'candidateCount': len(candidates), 'candidates': candidates}
     payload['sourceCoverage'] = {'announcements': True, 'previousLimitPool': limit_error is None, 'limitPoolError': limit_error}
+    payload['observationStatus'] = observation_status(generated)
+    payload['informationAsOf'] = now.isoformat()
     if limit_error:
         payload['source'] = 'Eastmoney announcements; previous trading day limit pool unavailable'
     output = Path(args.output)

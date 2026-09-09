@@ -10,6 +10,8 @@ function runtimeAt(time = '09:25:20', fetch) {
   let clock = Date.parse(`2026-09-07T${time}+08:00`);
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [clock])); } static now() { return clock; } }
   const r = createRuntime({ Date: Clock, ...(fetch ? { fetch } : {}) });
+  // The separately tested delayed-event extension has its own network fixtures.
+  r.run('refreshDelayedPremarket=async()=>{}');
   r.setTime = value => { clock = Date.parse(value.includes('T') ? value : `2026-09-07T${value}+08:00`); };
   return r;
 }

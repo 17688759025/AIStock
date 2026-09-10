@@ -125,7 +125,7 @@ function applyFrozenAuction(payload){
 }
 function recoveredAuctionCacheKey(date=tradeDateKey(),scope=mainOnly?'main':'all'){return 'ai_stock_recovered_0925_'+AUCTION_MODEL_VERSION+'_v1_'+date+'_'+scope}
 function validateRecoveredAuction(p,date=tradeDateKey(),scope=mainOnly?'main':'all'){
- const recoveredAt=Date.parse(p?.recoveredAt),earliest=Date.parse(date+'T09:30:00+08:00'),latest=Date.parse(date+'T23:59:59+08:00');
+ const recoveredAt=Date.parse(p?.recoveredAt),earliest=Date.parse(date+'T09:25:00+08:00'),latest=Date.parse(date+'T23:59:59+08:00');
  if(!p||p.schemaVersion!==1||p.modelVersion!==AUCTION_MODEL_VERSION||p.tradeDate!==date||p.scope!==scope||p.status!=='recovered'||p.auctionBasis!=='today-open'||!Number.isFinite(recoveredAt)||recoveredAt<earliest||recoveredAt>latest||!Number.isFinite(p.scannedCount)||!Number.isFinite(p.candidateCount)||!Array.isArray(p.picks)||p.picks.length>FINAL_LIMIT||new Set(p.picks.map(s=>s.code)).size!==p.picks.length||p.picks.some(s=>!/^[0-9]{6}$/.test(s.code)||!Number.isFinite(s.auction)||!Number.isFinite(s.score)||!s.recoveredAuction))throw Error('本机竞价重建缓存不完整');
  return p;
 }
@@ -134,14 +134,16 @@ function applyRecoveredAuction(payload){
  stocks.forEach(s=>{const live=liveAuctionChanges.get(s.code);if(live){s.currentChange=live.change;s.auctionReturn=live.change-s.auction}});renderPremarket();return payload;
 }
 async function verifyAuctionRecoveryDate(date=tradeDateKey()){
- const tencent=(async()=>{const r=await fetch('https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=sh000001',{cache:'no-store'});if(!r.ok)throw Error('腾讯日期校验失败');const j=await r.json(),d=String(j?.data?.sh000001?.data?.date||'').replace(/-/g,'');if(d!==date.replace(/-/g,''))throw Error('腾讯行情不是今日数据');return true})();
+ const tencent=(async()=>{const c=new AbortController(),timer=setTimeout(()=>c.abort(),4000);try{const r=await fetch('https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=sh000001',{cache:'no-store',signal:c.signal});if(!r.ok)throw Error('腾讯日期校验失败');const j=await r.json(),d=String(j?.data?.sh000001?.data?.date||'').replace(/-/g,'');if(d!==date.replace(/-/g,''))throw Error('腾讯行情不是今日数据');return true}finally{clearTimeout(timer)}})();
  const eastmoney=(async()=>{const j=await fetchJson('https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f12,f2,f124&secids=1.000001',4000),row=(j?.data?.diff||[])[0];if(!(Number(row?.f2)>0)||marketParts(new Date(Number(row?.f124)*1000)).date!==date)throw Error('东方财富行情不是今日数据');return true})();
  try{return await Promise.any([tencent,eastmoney])}catch(e){throw Error('无法确认行情属于今日，拒绝使用旧数据重建')}
 }
 async function buildRecoveredAuction(date=tradeDateKey(),scope=mainOnly?'main':'all'){
+ if(hhmm()<925)throw Error('等待09:25竞价结束，不能使用未定价数据');
+ $('dataNote').textContent='正式快照缺失，正在实时拉取行情重建竞价…';
  await verifyAuctionRecoveryDate(date);let raw;try{raw=await loadEastmoneyMarket()}catch(e){$('dataNote').textContent='东方财富全市场不可用，正在切换新浪重建竞价…';raw=await loadSinaMarket()}
  if(raw.length<4500)throw Error('本机竞价重建市场覆盖不足（'+raw.length.toLocaleString()+'只）');
- const market=stableStocks(scope==='main'?raw.filter(isMainBoard):raw);allStocks=market;totalCount=market.length;auctionBreadth=market.filter(s=>s.auction>0).length/Math.max(1,market.length)*100;
+ const priced=raw.filter(s=>s.openPrice>0&&s.previousClose>0),market=stableStocks(scope==='main'?priced.filter(isMainBoard):priced);if(!market.length||!market.some(s=>s.volume>0))throw Error('今日开盘价或成交量尚未返回，刷新将重新实时拉取');allStocks=market;totalCount=market.length;auctionBreadth=market.filter(s=>s.auction>0).length/Math.max(1,market.length)*100;
  const base=market.filter(s=>s.auction>=.6&&s.auction<=8.5&&s.volume>0&&!isNearLimit(s));await enrichAuctionSectors(base);
  stocks=[...base].sort((a,b)=>auctionBell(b.auction,2.757,2.2)-auctionBell(a.auction,2.757,2.2)||(String(a.code)<String(b.code)?-1:1)).slice(0,40);await enrichAuctionHistory(stocks);enrichMarket(base);prepareAuctionScores(stocks);
  const candidates=structuredClone(stocks),picks=rank(stocks).map(s=>({...s,recoveredAuction:true,frozenAuction:false,auctionVolumeApproximate:true}));await preparePremarketObservation(market);premarketState='本机重建 · '+premarketState;
@@ -282,7 +284,7 @@ async function refresh(){
  try{
   if(requestedMode==='auction'){
    let payload,view,recovered=false;
-   try{payload=await loadFrozenAuction();if(!current())return;view=applyFrozenAuction(payload)}catch(e){if(hhmm()<930)throw e;payload=await loadRecoveredAuction();if(!current())return;view=applyRecoveredAuction(payload);recovered=true}
+   try{payload=await loadFrozenAuction();if(!current())return;view=applyFrozenAuction(payload)}catch(e){if(!current())return;payload=await loadRecoveredAuction();if(!current())return;view=applyRecoveredAuction(payload);recovered=true}
    dataProvider=recovered?payload.source+' · 本机重建':payload.source+' · 09:25冻结';$('sourceMode').textContent=dataProvider;
    const recoveredAt=recovered?new Date(payload.recoveredAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',second:'2-digit'}):null;
    $('listNote').textContent=recovered?'今日开盘价重建 · 本机名单固定':'09:25 冻结 · 刷新仅更新实时涨跌';$('dataNote').textContent=recovered?'正式09:25快照缺失，已按今日开盘价重建并缓存本机；正在更新实时涨跌…':'09:25名单已冻结，正在更新实时涨跌…';render();
@@ -323,6 +325,16 @@ async function refresh(){
  }finally{if(current()&&requestedMode==='auction')await refreshDelayedPremarket(current);if(current())$('refreshBtn').disabled=false}
 }
 let delayedObservation=null;
+async function loadPremarketQuotes(candidates){
+ const quotes=new Map(),date=tradeDateKey();
+ try{const j=await fetchJson('https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f12,f14,f3,f6,f8,f10,f17,f18,f100,f124&secids='+candidates.map(x=>secid(x.code)).join(','),4000);const rows=Object.values(j?.data?.diff||{}).filter(x=>x.f124>0&&marketParts(new Date(x.f124*1000)).date===date&&Number(x.f17)>0&&Number(x.f18)>0);normalize(rows).forEach(q=>quotes.set(q.code,q))}catch(e){}
+ const missing=candidates.filter(c=>!quotes.has(c.code));
+ for(let i=0;i<missing.length;i+=5)await Promise.all(missing.slice(i,i+5).map(async s=>{
+  const key=(s.code.startsWith('6')?'sh':/^[489]/.test(s.code)?'bj':'sz')+s.code,c=new AbortController(),timer=setTimeout(()=>c.abort(),4000);
+  try{const r=await fetch('https://web.ifzq.gtimg.cn/appstock/app/minute/query?code='+key,{cache:'no-store',signal:c.signal});if(!r.ok)throw Error('腾讯报价失败');const j=await r.json(),q=j?.data?.[key]?.qt?.[key];if(String(q?.[30]||'').slice(0,8)!==date.replace(/-/g,'')||!(Number(q[5])>0)||!(Number(q[4])>0)||!(Number(q[3])>0)||!(Number(q[37])>0))return;const normalized=normalize([{f12:s.code,f14:q[1]||s.name,f17:Number(q[5]),f18:Number(q[4]),f3:(Number(q[3])/Number(q[4])-1)*100,f6:Number(q[37])*10000,f8:Number(q[38]),f10:0}])[0];if(normalized)quotes.set(s.code,{...normalized,quoteSource:'Tencent'})}catch(e){}finally{clearTimeout(timer)}
+ }));
+ return candidates.map(s=>quotes.get(s.code)).filter(Boolean);
+}
 async function refreshDelayedPremarket(current=()=>true){
  if(hhmm()<925)return;
  const missing=/缺失|尚未|等待|未就绪|本机重建/.test(premarketState);
@@ -333,11 +345,12 @@ async function refreshDelayedPremarket(current=()=>true){
   if(delayedObservation?.key===key){premarketPick=structuredClone(delayedObservation.pick);premarketState=delayedObservation.state;renderPremarket();return}
   const candidates=pool.candidates.filter(x=>!mainOnly||isMainBoard(x));
   let quotes=[];
-  if(candidates.length){const j=await fetchJson('https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f12,f14,f3,f6,f8,f10,f17,f18,f100,f124&secids='+candidates.map(x=>secid(x.code)).join(','),4000);if(!current())return;const rows=Object.values(j?.data?.diff||{}).filter(x=>x.f124>0&&marketParts(new Date(x.f124*1000)).date===tradeDateKey()&&Number(x.f17)>0&&Number(x.f18)>0);quotes=normalize(rows);if(quotes.length<candidates.length)throw Error('候选报价尚不完整，稍后刷新继续确认')}
+  if(candidates.length){quotes=await loadPremarketQuotes(candidates);if(!current())return;if(!quotes.length)throw Error('东财、腾讯均未返回有效当日报价，刷新将重新拉取')}
   await preparePremarketObservation(quotes,pool);if(!current())return;
-  premarketState='延迟观察 · 数据 '+new Date(pool.generatedAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai'})+' · 使用当前累计成交额确认 · '+premarketState;
+  const partial=quotes.length<candidates.length;
+  premarketState='延迟观察 · '+(partial?'部分报价临时结果 '+quotes.length+'/'+candidates.length+'，刷新继续补取 · ':'')+'数据 '+new Date(pool.generatedAt).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai'})+' · 使用当前累计成交额确认 · '+premarketState;
   if(premarketPick)premarketPick={...premarketPick,delayed:true,confirmedAt:new Date().toISOString()};
-  delayedObservation={key,pick:structuredClone(premarketPick),state:premarketState};renderPremarket();
+  delayedObservation=partial?null:{key,pick:structuredClone(premarketPick),state:premarketState};renderPremarket();
  }catch(e){if(current()){premarketState='等待延迟观察：'+e.message;renderPremarket()}}
 }
 // Browser startup

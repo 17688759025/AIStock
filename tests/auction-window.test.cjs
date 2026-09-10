@@ -107,18 +107,19 @@ test('the same immutable result is used at 09:25, after 09:30, and in a fresh br
 });
 
 test('missing snapshot rebuilds once from today open; official cache wins and recovery expires next day', async () => {
-  const r=runtimeAt('10:00:00',async()=>{throw Error('offline')});
+  const r=runtimeAt('09:25:05',async()=>{throw Error('offline')});
   const market=Array.from({length:4500},(_,i)=>({code:String(600000+i),name:'重建'+i,sector:'测试',auction:i<60?2.4+i*.01:0,currentChange:1,auctionReturn:0,openPrice:10,previousClose:9.8,amount:1e8+i,volume:1,volumeUnit:'x',turnover:1,signals:[],trend:[0,0,0,0,2.5],sectorScore:50,marketScore:50,pressure:50,windowChange:0,windowVolume:1}));
   r.context.market=market;r.run("let recoveryLoads=0;verifyAuctionRecoveryDate=async()=>true;loadEastmoneyMarket=async()=>{recoveryLoads++;dataProvider='测试全市场';return structuredClone(market)};enrichAuctionSectors=async list=>list;enrichAuctionHistory=async list=>list;prepareAuctionScores=list=>list.forEach((s,i)=>{s.adaptiveScore=90-i;s.score=90-i;s.meetsTarget=true;s.confidence=60});preparePremarketObservation=async()=>{premarketPick=null;premarketState='无单只候选'};loadAuctionLiveChanges=async()=>[]");
   await r.run('refresh()');assert.equal(r.run('stocks.length'),5);assert.ok(r.run('stocks.every(s=>s.recoveredAuction&&!s.frozenAuction)'));assert.match(r.elements.get('dataNote').textContent,/今日开盘价/);assert.match(r.elements.get('sourceMode').textContent,/本机重建/);assert.equal(r.run('recoveryLoads'),1);
-  const first=plain(r.run('stocks'));r.run('loadEastmoneyMarket=async()=>{throw Error("MUST NOT REBUILD")};stocks=[]');await r.run('refresh()');assert.deepEqual(plain(r.run('stocks')),first);assert.equal(r.run('recoveryLoads'),1);
+  const first=plain(r.run('stocks'));r.setTime('10:00:00');r.run('loadEastmoneyMarket=async()=>{throw Error("MUST NOT REBUILD")};stocks=[]');await r.run('refresh()');assert.deepEqual(plain(r.run('stocks')),first);assert.equal(r.run('recoveryLoads'),1);
   r.context.fixture=frozenFixture(r);r.run('localStorage.setItem(frozenCacheKey(),JSON.stringify(fixture));stocks=[]');await r.run('refresh()');assert.equal(r.run('stocks.length'),2);assert.ok(r.run('stocks.every(s=>s.frozenAuction)'));assert.doesNotMatch(r.elements.get('sourceMode').textContent,/本机重建/);
   r.run('loadSinaMarket=async()=>{throw Error("MUST NOT USE EXPIRED RECOVERY")}');r.setTime('2026-09-08T10:00:00+08:00');await r.run('refresh()');assert.equal(r.run('stocks.length'),0);assert.equal(r.run('premarketPick'),null);
 });
 
-test('auction recovery waits until 09:30 and rejects unverified market dates', async () => {
-  const r=runtimeAt('09:29:59',async()=>{throw Error('offline')});r.run('loadEastmoneyMarket=async()=>{throw Error("MUST NOT RECOVER BEFORE 09:30")}');await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/尚未发布/);
-  r.setTime('09:30:00');r.run("verifyAuctionRecoveryDate=async()=>{throw Error('无法确认行情属于今日，拒绝使用旧数据重建')}");await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/无法确认行情属于今日/);assert.equal(r.run('localStorage.getItem(recoveredAuctionCacheKey())'),null);
+test('auction recovery starts at 09:25 but rejects pre-auction and unverified dates', async () => {
+  const r=runtimeAt('09:24:59',async()=>{throw Error('offline')});r.run('loadEastmoneyMarket=async()=>{throw Error("MUST NOT RECOVER BEFORE 09:25")}');await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/等待09:25/);
+  r.setTime('09:25:00');r.run("verifyAuctionRecoveryDate=async()=>{throw Error('无法确认行情属于今日，拒绝使用旧数据重建')}");await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/无法确认行情属于今日/);assert.equal(r.run('localStorage.getItem(recoveredAuctionCacheKey())'),null);
+  r.run("verifyAuctionRecoveryDate=async()=>true;loadEastmoneyMarket=async()=>Array.from({length:4500},(_,i)=>({code:String(600000+i),name:'未定价',openPrice:0,previousClose:10,volume:0}))");await r.run('refresh()');assert.match(r.elements.get('dataNote').textContent,/开盘价或成交量尚未返回/);assert.equal(r.run('localStorage.getItem(recoveredAuctionCacheKey())'),null);
 });
 
 test('debug, wrong-day, pre-09:25 and post-09:30 snapshots are rejected', () => {

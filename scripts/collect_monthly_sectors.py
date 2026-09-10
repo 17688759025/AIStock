@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -17,13 +18,14 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo('Asia/Shanghai')
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = 'monthly-evidence-v1'
+VERSION = 'monthly-evidence-v2-lookback15'
+LOOKBACK = 15
 THEMES = [
     {'id': 'agriculture', 'name': '粮食与种业', 'boards': ['农牧饲渔', '种植业'], 'proxy': 'DBA', 'proxyName': 'DBA 农产品期货组合', 'words': ['粮食', '种业', '小麦', '玉米', '大豆', 'grain', 'wheat', 'corn', 'soybean']},
     {'id': 'chemicals', 'name': '化工与化肥', 'boards': ['化学原料', '化学制品', '化肥行业'], 'proxy': 'XLB', 'proxyName': 'XLB 美国材料行业（宽口径代理）', 'words': ['化工', '化肥', '尿素', '磷肥', 'chemical', 'fertilizer', 'potash']},
     {'id': 'semiconductors', 'name': '存储与半导体', 'boards': ['半导体'], 'proxy': 'SOXX', 'proxyName': 'SOXX 美国半导体行业', 'words': ['半导体', '存储芯片', '存储器', 'dram', 'nand', 'hbm', 'micron', 'semiconductor', 'memory chip']},
     {'id': 'computing', 'name': '算力与通信', 'boards': ['通信设备', '计算机设备'], 'proxy': 'QQQ', 'proxyName': 'QQQ 纳斯达克100（宽口径代理）', 'words': ['算力', '数据中心', '光模块', '服务器', 'data center', 'datacenter', 'ai infrastructure']},
-    {'id': 'energy', 'name': '石油与天然气', 'boards': ['石油行业', '燃气'], 'proxy': 'XLE', 'proxyName': 'XLE 美国能源行业', 'words': ['原油', '天然气', '石油', 'opec', 'crude', 'natural gas', 'lng']},
+    {'id': 'energy', 'name': '石油与天然气', 'boards': ['石油石化', '石油行业', '燃气'], 'proxy': 'XLE', 'proxyName': 'XLE 美国能源行业', 'words': ['原油', '天然气', '石油', 'opec', 'crude', 'natural gas', 'lng']},
     {'id': 'metals', 'name': '有色金属', 'boards': ['有色金属', '工业金属', '小金属'], 'proxy': 'DBB', 'proxyName': 'DBB 工业金属期货组合', 'words': ['铜价', '铝价', '稀土', '工业金属', 'copper', 'aluminum', 'rare earth']},
     {'id': 'gold', 'name': '黄金与贵金属', 'boards': ['贵金属'], 'proxy': 'GLD', 'proxyName': 'GLD 黄金价格代理', 'words': ['黄金', '金价', '贵金属', 'gold', 'bullion']},
     {'id': 'biotech', 'name': '创新药与生物医药', 'boards': ['生物制品', '化学制药'], 'proxy': 'XBI', 'proxyName': 'XBI 美国生物科技行业', 'words': ['创新药', '临床试验', '药品获批', 'biotech', 'clinical trial', 'drug approval']},
@@ -45,12 +47,29 @@ def request(url, xml=False):
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://quote.eastmoney.com/'})
             with urllib.request.urlopen(req, timeout=12) as response:
                 raw = response.read(4_000_000)
-            return ET.fromstring(raw) if xml else json.loads(raw)
+            if xml:
+                return ET.fromstring(raw)
+            text = raw.decode('utf-8')
+            if text.startswith('monthlyCallback('):
+                text = text[len('monthlyCallback('):].rstrip().removesuffix(';').removesuffix(')')
+            return json.loads(text)
         except Exception as exc:
             error = exc
             if not attempt:
                 time.sleep(.5)
-    raise RuntimeError(str(error))
+    # Some quote gateways close Python's HTTP connection while serving curl.
+    # Bounded transport fallback only; no credentials, proxy rotation or rate-limit bypass.
+    try:
+        result = subprocess.run(['curl','--fail','--silent','--show-error','--location','--max-time','15',url],capture_output=True,timeout=18,check=True)
+        raw = result.stdout
+        if xml:
+            return ET.fromstring(raw)
+        text = raw.decode('utf-8')
+        if text.startswith('monthlyCallback('):
+            text = text[len('monthlyCallback('):].rstrip().removesuffix(';').removesuffix(')')
+        return json.loads(text)
+    except Exception:
+        raise RuntimeError(str(error)) from None
 
 
 def number(value):
@@ -80,7 +99,7 @@ def news_item(title, link, published, source, region, now):
             return None
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=TZ)
-    if stamp > now or (now-stamp).total_seconds() > 21*86400 or not link.startswith(('https://', 'http://')):
+    if stamp > now or (now-stamp).total_seconds() > 60*86400 or not link.startswith(('https://', 'http://')):
         return None
     title = re.sub('<[^>]+>', '', title).strip()[:180]
     key = hashlib.sha256(re.sub(r'\W+', '', title.casefold()).encode()).hexdigest()[:20]
@@ -100,39 +119,20 @@ def fetch_news(feed, now):
     return rows
 
 
-def board_market(now):
-    params = {'pz': 100, 'po': 1, 'np': 1, 'fltt': 2, 'invt': 2, 'fid': 'f12', 'fs': 'm:90+t:2', 'fields': 'f12,f14,f3,f62,f184,f124'}
-    rows, expected = [], None
-    for page in range(1, 13):
-        j = request('https://push2.eastmoney.com/api/qt/clist/get?' + urllib.parse.urlencode(dict(params, pn=page)))
-        data = j.get('data') or {}
-        expected = int(data.get('total') or 0)
-        chunk = data.get('diff') or []
-        rows.extend(chunk.values() if isinstance(chunk, dict) else chunk)
-        if len(rows) >= expected:
-            break
-    if not expected or len({r['f12'] for r in rows}) < expected:
-        raise RuntimeError('incomplete sector universe')
-    # A fresh timestamp is required for a usable cumulative flow observation.
-    valid = []
-    for r in rows:
-        ts = number(r.get('f124'))
-        date = dt.datetime.fromtimestamp(ts, TZ).date() if ts else None
-        if date == now.date() and number(r.get('f62')) is not None:
-            valid.append(r)
-    if not valid:
-        raise RuntimeError('no sector flow observations dated today')
-    return valid
 
 
 def price_features(bars, now):
     # Completed sessions only: live bars cannot masquerade as closing returns.
     bars = sorted({d: p for d, p in bars if d < now.date().isoformat() and number(p) is not None and p > 0}.items())
-    if len(bars) < 21 or (now.date()-dt.date.fromisoformat(bars[-1][0])).days > 7:
+    if len(bars) < 11 or (now.date()-dt.date.fromisoformat(bars[-1][0])).days > 7:
         raise RuntimeError('insufficient or stale completed price sessions')
+    bars = bars[-16:]
     values = [p for _, p in bars]
-    return {'asOf': bars[-1][0], 'return5': (values[-1]/values[-6]-1)*100,
-            'return20': (values[-1]/values[-21]-1)*100, 'nearHigh': values[-1]/max(values[-21:])*100}
+    result = {'asOf': bars[-1][0], 'sessions': len(bars)-1, 'dates': [d for d, _ in bars],
+              'nearHigh': values[-1]/max(values)*100}
+    for period in (3, 5, 10, 15):
+        result['return'+str(period)] = (values[-1]/values[-period-1]-1)*100 if len(values)>period else None
+    return result
 
 
 def foreign_price(symbol, now):
@@ -148,18 +148,133 @@ def foreign_price(symbol, now):
 
 
 def domestic_price(code, now):
-    params = {'secid': '90.'+code, 'klt': 101, 'fqt': 0, 'lmt': 65, 'beg': (now.date()-dt.timedelta(days=180)).strftime('%Y%m%d'), 'end': '20500101', 'fields1': 'f1,f2,f3,f4,f5,f6', 'fields2': 'f51,f52,f53,f54,f55,f56'}
+    params = {'secid': code if '.' in code else '90.'+code, 'klt': 101, 'fqt': 0, 'lmt': 40, 'beg': (now.date()-dt.timedelta(days=100)).strftime('%Y%m%d'), 'end': now.strftime('%Y%m%d'), 'fields1': 'f1,f2,f3,f4,f5,f6', 'fields2': 'f51,f52,f53,f54,f55,f56'}
     j = request('https://push2his.eastmoney.com/api/qt/stock/kline/get?'+urllib.parse.urlencode(params))
-    bars = [(p[0], float(p[2])) for p in (x.split(',') for x in (j.get('data') or {}).get('klines') or [])]
-    return price_features(bars, now)
+    rows = [x.split(',') for x in (j.get('data') or {}).get('klines') or []]
+    result = price_features([(p[0], float(p[2])) for p in rows], now)
+    volume = [number(p[5]) for p in rows if p[0] in result['dates']]
+    if len(volume) >= 10 and all(v is not None for v in volume) and sum(volume[-10:-5]) > 0:
+        result['volumeRatio5'] = sum(volume[-5:])/sum(volume[-10:-5])
+    result['source'] = '东方财富板块日线'
+    return result
 
 
-def merge_news(previous, incoming, now):
+def resolve_board(theme):
+    for name in theme['boards']:
+        j = request('https://searchapi.eastmoney.com/api/suggest/get?'+urllib.parse.urlencode({'input': name, 'type': 14, 'count': 10}))
+        for row in (j.get('QuotationCodeTable') or {}).get('Data') or []:
+            if row.get('Name') == name and re.fullmatch(r'BK\d+', row.get('Code', '')):
+                return {'code': row['Code'], 'name': name}
+    raise RuntimeError('no exact sector code match')
+
+
+def flow_features(rows, dates):
+    unique = {r['date']: r for r in rows if r['date'] in dates and number(r.get('net')) is not None and number(r.get('ratio')) is not None}
+    valid = [unique[d] for d in dates if d in unique][-LOOKBACK:]
+    if len(valid) < 10 or not set(dates[-5:]).issubset(unique):
+        raise RuntimeError('历史资金不足10个交易日或缺少最近交易日')
+    result = {'rows': valid, 'sessions': len(valid), 'asOf': valid[-1]['date'], 'positive5': sum(r['net'] > 0 for r in valid[-5:]), 'days5': len(valid[-5:])}
+    for n in (3, 5, 10, 15):
+        result['net'+str(n)] = sum(unique[d]['net'] for d in dates[-n:]) if len(dates)>=n and set(dates[-n:]).issubset(unique) else None
+    recent = sum(r['ratio'] for r in valid[-3:])/3
+    prior = sum(r['ratio'] for r in valid[-8:-3])/len(valid[-8:-3])
+    result.update(ratio3=recent, acceleration=recent-prior)
+    return result
+
+
+def historical_flow(code, dates):
+    params = {'secid': '90.'+code, 'lmt': 40, 'klt': 101, 'fields1': 'f1,f2,f3,f7', 'fields2': ','.join('f'+str(i) for i in range(51,66))}
+    j = request('https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?'+urllib.parse.urlencode(params))
+    rows = [x.split(',') for x in (j.get('data') or {}).get('klines') or []]
+    return flow_features([{'date': x[0], 'net': number(x[1]), 'ratio': number(x[6])} for x in rows if len(x)>=7], dates)
+
+
+def historical_news(theme, now, start):
+    items, seen = [], set()
+    for page in range(1, 4):
+        param = {'uid': '', 'keyword': theme['words'][0], 'type': ['cmsArticleWebOld'], 'client': 'web', 'clientType': 'web', 'clientVersion': 'curr', 'param': {'cmsArticleWebOld': {'searchScope': 'default', 'sort': 'default', 'pageIndex': page, 'pageSize': 50, 'preTag': '', 'postTag': ''}}}
+        j = request('https://search-api-web.eastmoney.com/search/jsonp?'+urllib.parse.urlencode({'cb': 'monthlyCallback', 'param': json.dumps(param, ensure_ascii=False)}))
+        rows = (j.get('result') or {}).get('cmsArticleWebOld')
+        if not isinstance(rows, list):
+            raise RuntimeError('新闻搜索响应异常')
+        fresh = 0
+        for r in rows:
+            item = news_item(r.get('title', ''), 'https://finance.eastmoney.com/a/'+str(r.get('code', ''))+'.html', r.get('date', ''), r.get('mediaName') or '东财资讯搜索', 'mixed', now)
+            if item and item['publishedAt'][:10] >= start and item['id'] not in seen:
+                seen.add(item['id']); items.append(item); fresh += 1
+        if len(rows)<50 or not fresh:
+            break
+    return items
+
+
+def market_calendar(now):
+    try:
+        p = domestic_price('1.000001', now)
+    except Exception:
+        j = request('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000001,day,,,40,qfq')
+        data = (j.get('data') or {}).get('sh000001') or {}
+        p = price_features([(x[0], float(x[2])) for x in data.get('day', data.get('qfqday', []))], now)
+        p['source'] = '腾讯上证指数日线'
+    if p['sessions'] < LOOKBACK:
+        raise RuntimeError('无法确认最近15个交易日')
+    return p
+
+
+def hot_concepts(now, last_session):
+    # Current Top 100 is an explicitly limited snapshot, not historical popularity.
+    params = {'pn': 1, 'pz': 100, 'po': 1, 'np': 1, 'fltt': 2, 'invt': 2, 'fid': 'f3', 'fs': 'm:90+t:3', 'fields': 'f12,f14,f3,f62,f104,f105,f124'}
+    j = request('https://push2.eastmoney.com/api/qt/clist/get?'+urllib.parse.urlencode(params))
+    raw = (j.get('data') or {}).get('diff') or []
+    raw = list(raw.values()) if isinstance(raw, dict) else raw
+    rows = []
+    for r in raw:
+        ts = number(r.get('f124'))
+        if not ts:
+            continue
+        date = dt.datetime.fromtimestamp(ts, TZ).date().isoformat()
+        if date not in {last_session, now.date().isoformat()}:
+            continue
+        if number(r.get('f3')) is not None:
+            rows.append({'code': r['f12'], 'name': r['f14'], 'change': number(r['f3']), 'flow': number(r.get('f62')), 'up': number(r.get('f104')), 'down': number(r.get('f105')), 'asOf': date})
+    if not rows:
+        raise RuntimeError('无有效日期的概念行情快照')
+    return rows
+
+
+def board_changes(now):
+    j = request('https://push2ex.eastmoney.com/getAllBKChanges?ut=7eea3edcaed734bea9cbfc24409ed989&dpt=wzchanges&pageindex=0&pagesize=5000')
+    rows = (j.get('data') or {}).get('allbk')
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError('板块异动接口无数据；历史异动不补造')
+    # Preserve provider fields for audit; no fake dates or stock-count inference.
+    valid = [{**r, 'ct':number(r['ct']), 'u':number(r['u']), 'zjl':number(r['zjl'])} for r in rows if r.get('n') and number(r.get('ct')) is not None and number(r.get('u')) is not None and number(r.get('zjl')) is not None]
+    if not valid:
+        raise RuntimeError('板块异动字段不可验证')
+    return {'observedAt': now.isoformat(), 'basis': '接口当前快照，非15日历史', 'rows': valid}
+
+
+def theme_heat(theme, concepts, anomalies):
+    keys = theme['words'] + theme['boards']
+    matching = [r for r in concepts if mentions(r['name'], keys)]
+    selected = [r for r in (anomalies or {}).get('rows', []) if mentions(r['n'], keys)]
+    bullish = [r for r in matching if r['change'] > 0 and (r['flow'] or 0) > 0]
+    breadth = [r['up']/(r['up']+r['down']) for r in matching if r['up'] is not None and r['down'] is not None and r['up']+r['down']>0]
+    concept_score = clamp(len(bullish)*15 + (sum(breadth)/len(breadth)*40 if breadth else 0)) if matching else 0
+    positive = sum(max(0, r['ct']) for r in selected if r['u']>0 and r['zjl']>0)
+    negative = sum(max(0, r['ct']) for r in selected if r['u']<0 or r['zjl']<0)
+    anomaly_score = clamp(20*math.log1p(positive)-10*math.log1p(negative)) if selected else 0
+    return {'score': round(.5*concept_score+.5*anomaly_score, 1), 'concepts': matching, 'anomalies': selected,
+            'conceptScore': round(concept_score, 1), 'anomalyScore': round(anomaly_score, 1),
+            'basis': '概念涨幅Top100行情热度代理 + 当前板块异动；没有15日历史热榜',
+            'observedAt': (anomalies or {}).get('observedAt'), 'coverage': bool(matching or selected)}
+
+
+def merge_news(previous, incoming, now, start=None):
     result = {}
     for n in previous+incoming:
         try:
             stamp = dt.datetime.fromisoformat(n['publishedAt'])
-            if stamp <= now and now-stamp <= dt.timedelta(days=21):
+            if stamp <= now and now-stamp <= dt.timedelta(days=60) and (not start or stamp.astimezone(TZ).date().isoformat() >= start):
                 result.setdefault(n['id'], n)
         except (KeyError, ValueError, TypeError):
             continue
@@ -177,31 +292,36 @@ def score_theme(theme, news, days, now):
     evidence = [n for n in news if mentions(n['title'], theme['words'])]
     positive = [n for n in evidence if mentions(n['title'], POSITIVE) and not mentions(n['title'], NEGATIVE)]
     negative = [n for n in evidence if mentions(n['title'], NEGATIVE)]
-    # Titles identify research leads; they do not establish a causal profit effect.
-    news_score = clamp(len(positive)*18 + min(25, len(evidence)*3) + min(15, len({n['source'] for n in evidence})*5) - len(negative)*12)
-    flows = [x['themes'].get(theme['id'], {}).get('flow') for x in days[-5:]]
-    flows = [x for x in flows if x is not None]
-    current_flow = latest.get('flow')
-    flow_score = clamp(50 + (latest.get('flowRatio') or 0)*5) if current_flow is not None else 0
-    if flows and current_flow is not None:
-        flow_score = .5*flow_score + .5*100*sum(x > 0 for x in flows)/len(flows)
+    # Recent 3-5 sessions have higher relevance; source breadth is capped.
+    dates = latest.get('windowDates', [])
+    recent_start = dates[-5] if len(dates)>=5 else now.date().isoformat()
+    strength = sum(1 if n['publishedAt'][:10]>=recent_start else .4 for n in positive)
+    news_score = clamp(strength*12 + min(15, len(evidence)*2) + min(15, len({n['source'] for n in evidence})*5) - len(negative)*8)
+    flow = latest.get('flowHistory')
+    flow_score = clamp(35+flow['ratio3']*4+flow['acceleration']*3+30*flow['positive5']/flow['days5']) if flow else 0
     foreign, domestic = latest.get('foreign'), latest.get('domestic')
-    foreign_score = clamp(45+foreign['return5']*3+foreign['return20']) if foreign else 0
-    domestic_score = clamp(45+domestic['return5']*3) if domestic else 0
-    active_days = sum(1 for x in days[-10:] if (x['themes'].get(theme['id'], {}).get('flow') or 0) > 0)
-    persistence = min(100, active_days*20)
-    penalty = min(35, max(0, domestic['return20']-12)*1.5+max(0, domestic['return5']-6)*2) if domestic else 0
-    factors = {'news': round(news_score, 1), 'flow': round(flow_score, 1), 'foreign': round(foreign_score, 1), 'domestic': round(domestic_score, 1), 'persistence': persistence}
-    weights = {'news': 30, 'flow': 25, 'foreign': 20, 'domestic': 15, 'persistence': 10}
-    coverage = {'news': bool(evidence), 'flow': current_flow is not None, 'foreign': foreign is not None, 'domestic': domestic is not None}
-    score = round(clamp(sum(factors[k]*w/100 for k, w in weights.items())-penalty), 1)
-    count = sum(coverage.values())
-    eligible = count >= 3 and coverage['domestic'] and coverage['news'] and len(positive) >= 1 and score >= 55 and penalty < 20 and len(days) >= 3
-    return {**theme, 'score': score, 'eligible': eligible, 'coverage': coverage, 'factors': factors, 'weights': weights,
-            'overheatPenalty': round(penalty, 1), 'positiveNews': len(positive), 'riskNews': len(negative),
-            'observedDays': len(days), 'flowPositiveDays': sum(x > 0 for x in flows), 'flowDays': len(flows),
-            'flow': current_flow, 'foreign': foreign, 'domestic': domestic, 'evidence': evidence[:8],
-            'stage': '涨幅偏高' if penalty >= 20 else '证据不足' if count < 3 else '初步观察' if len(days) < 3 else '持续跟踪'}
+    foreign_score = clamp(40+foreign['return3']*3+foreign['return5']*2+(foreign.get('return15') or 0)*.3) if foreign else 0
+    domestic_score = clamp(35+domestic['return3']*3+domestic['return5']*2+domestic.get('relative5', 0)*3+clamp((domestic.get('volumeRatio5',1)-1)*15,-15,15)) if domestic else 0
+    heat = latest.get('heat') or {}
+    long_move = (domestic.get('return15') if domestic.get('return15') is not None else domestic['return10']) if domestic else 0
+    penalty = min(35,max(0,long_move-10)*1.5+max(0,domestic['return5']-5)*2) if domestic else 0
+    if domestic and flow and domestic['return5']>0 and flow['net5']<0:
+        penalty = min(45,penalty+8)
+    factors = {'news': round(news_score,1), 'flow': round(flow_score,1), 'heat': heat.get('score',0), 'domestic': round(domestic_score,1), 'foreign': round(foreign_score,1)}
+    weights = {'flow':25,'news':25,'heat':20,'domestic':15,'foreign':15}
+    coverage = {'news':bool(evidence),'flow':flow is not None,'heat':bool(heat.get('coverage')),'domestic':domestic is not None,'foreign':foreign is not None}
+    score = round(clamp(sum(factors[k]*w/100 for k,w in weights.items())-penalty),1)
+    # Deployment age never gates confirmation. Historical inputs must cover >=10 sessions.
+    eligible = sum(coverage.values())>=3 and coverage['domestic'] and coverage['news'] and bool(positive) and score>=55 and penalty<20 and domestic.get('sessions',0)>=10 and len(dates)==15
+    return {**theme,'score':score,'eligible':eligible,'coverage':coverage,'factors':factors,'weights':weights,
+            'overheatPenalty':round(penalty,1),'positiveNews':len(positive),'riskNews':len(negative),
+            'observedDays':len(days),'historicalSessions':domestic.get('sessions',0) if domestic else 0,
+            'windowDates':dates,'flowPositiveDays':flow['positive5'] if flow else 0,'flowDays':flow['days5'] if flow else 0,
+            'flow':flow['rows'][-1]['net'] if flow else None,'flowHistory':flow,'foreign':foreign,'domestic':domestic,
+            'heat':heat,'evidence':sorted(evidence,key=lambda n:n['publishedAt'],reverse=True)[:12],
+            'newsCoverage':{'count':len(evidence),'earliest':min((n['publishedAt'] for n in evidence),default=None),'complete':False},
+            'missing':[k for k,v in coverage.items() if not v],
+            'stage':'涨幅偏高或资金背离' if penalty>=20 else '可确认' if eligible else '证据不足，供比较'}
 
 
 def choose_month(ranked, previous, days, now):
@@ -246,63 +366,93 @@ def collect(root, now):
     history = read_json(directory/'history.json', [])
     news, failures, source_status = [], [], []
     observations = {t['id']: {} for t in THEMES}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        jobs = {pool.submit(fetch_news, f, now): ('news', f[0]) for f in FEEDS}
-        jobs[pool.submit(board_market, now)] = ('boards', '东方财富行业资金')
+    def status(label, ok, error=None):
+        source_status.append({'source':label,'ok':ok,'checkedAt':now.isoformat()})
+        if error:
+            failures.append(label+': '+str(error)[:180])
+    try:
+        benchmark = market_calendar(now)
+        dates = benchmark['dates'][-LOOKBACK:]
+        status('交易日历与大盘基准', True)
+    except Exception as exc:
+        benchmark, dates = None, []
+        status('交易日历与大盘基准', False, exc)
+    start = dates[0] if dates else (now.date()-dt.timedelta(days=45)).isoformat()
+    boards, concepts, anomalies = {}, [], None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        jobs = {pool.submit(fetch_news,f,now):('rss',f[0]) for f in FEEDS}
         for t in THEMES:
-            jobs[pool.submit(foreign_price, t['proxy'], now)] = ('foreign', t['id'])
-        boards = []
+            jobs[pool.submit(foreign_price,t['proxy'],now)] = ('foreign',t['id'])
+            jobs[pool.submit(resolve_board,t)] = ('mapping',t['id'])
+            jobs[pool.submit(historical_news,t,now,start)] = ('news',t['id'])
+        if dates:
+            jobs[pool.submit(hot_concepts,now,dates[-1])] = ('concepts','概念行情热度代理')
+        jobs[pool.submit(board_changes,now)] = ('anomalies','当前板块异动')
         for job in concurrent.futures.as_completed(jobs):
-            kind, label = jobs[job]
+            kind,label = jobs[job]
             try:
                 data = job.result()
-                if kind == 'news':
+                if kind in ('rss','news'):
                     news.extend(data)
-                elif kind == 'boards':
-                    boards = data
+                elif kind=='mapping':
+                    boards[label] = data
+                elif kind=='concepts':
+                    concepts = data
+                elif kind=='anomalies':
+                    anomalies = data
                 else:
-                    observations[label]['foreign'] = data
-                source_status.append({'source': label, 'ok': True, 'checkedAt': now.isoformat()})
+                    observations[label][kind] = data
+                status(label+' '+kind, True)
             except Exception as exc:
-                failures.append(label+': '+str(exc)[:140])
-                source_status.append({'source': label, 'ok': False, 'checkedAt': now.isoformat()})
+                status(label+' '+kind, False, exc)
         jobs = {}
         for t in THEMES:
-            matches = [b for name in t['boards'] for b in boards if b['f14'] == name]
-            if matches:
-                flows = [number(b.get('f62')) for b in matches]
-                ratios = [number(b.get('f184')) for b in matches]
-                observations[t['id']].update(flow=sum(x for x in flows if x is not None), flowRatio=sum(x for x in ratios if x is not None)/max(1, sum(x is not None for x in ratios)), boardNames=[b['f14'] for b in matches])
-                jobs[pool.submit(domestic_price, matches[0]['f12'], now)] = t['id']
+            ident = t['id']
+            observations[ident]['windowDates'] = dates
+            observations[ident]['heat'] = theme_heat(t,concepts,anomalies)
+            if ident in boards:
+                board = boards[ident]
+                observations[ident]['representativeBoard'] = board
+                # Independent jobs: one endpoint failure cannot suppress the other.
+                jobs[pool.submit(domestic_price,board['code'],now)] = ('domestic',ident)
+                if dates:
+                    jobs[pool.submit(historical_flow,board['code'],dates)] = ('flowHistory',ident)
         for job in concurrent.futures.as_completed(jobs):
+            kind,label = jobs[job]
             try:
-                observations[jobs[job]]['domestic'] = job.result()
-                source_status.append({'source': jobs[job]+'国内价格', 'ok': True, 'checkedAt': now.isoformat()})
+                data = job.result()
+                if kind=='domestic' and dates:
+                    if data['asOf']!=dates[-1]:
+                        raise RuntimeError('国内行情未覆盖最近交易日')
+                    data['relative5'] = data['return5']-benchmark['return5']
+                observations[label][kind] = data
+                status(label+' '+kind, True)
             except Exception as exc:
-                failures.append(jobs[job]+'国内价格: '+str(exc)[:140])
-                source_status.append({'source': jobs[job]+'国内价格', 'ok': False, 'checkedAt': now.isoformat()})
-    merged = merge_news(previous.get('news', []), news, now)
-    current = {'date': now.date().isoformat(), 'at': now.isoformat(), 'themes': observations}
-    days = daily_observations(history, current)
-    ranked = sorted([score_theme(t, merged, days, now) for t in THEMES], key=lambda t: (-t['score'], t['id']))
-    current['leader'] = next((r['id'] for r in ranked if r['eligible']), None)
-    days = daily_observations(history, current)
-    state = choose_month(ranked, previous.get('monthState', {}), days, now)
-    payload = {'schemaVersion': 1, 'modelVersion': VERSION, 'generatedAt': now.isoformat(), 'month': now.strftime('%Y-%m'),
-               'monthState': state, 'ranked': ranked, 'news': merged, 'sourceStatus': source_status, 'errors': failures,
-               'observedDays': len(days), 'method': '关键词线索 + 公开资金口径 + 价格代理；分数不是胜率，外盘价格不是外资净流入'}
-    # A failed run is auditable, while keeping the last useful day for persistence.
-    usable = bool(news or any(o for o in observations.values()))
+                status(label+' '+kind, False, exc)
+    merged = merge_news(previous.get('news',[]),news,now,start)
+    current = {'date':now.date().isoformat(),'at':now.isoformat(),'themes':observations,'modelVersion':VERSION}
+    days = daily_observations(history,current)
+    ranked = sorted([score_theme(t,merged,days,now) for t in THEMES],key=lambda t:(-t['score'],t['id']))
+    for row in ranked:
+        row['representativeBoard'] = boards.get(row['id'])
+    current['leader'] = next((r['id'] for r in ranked if r['eligible']),None)
+    days = daily_observations(history,current)
+    state = choose_month(ranked,previous.get('monthState',{}),days,now)
+    payload = {'schemaVersion':1,'modelVersion':VERSION,'generatedAt':now.isoformat(),'month':now.strftime('%Y-%m'),
+               'monthState':state,'ranked':ranked,'news':merged,'sourceStatus':source_status,'errors':failures,
+               'observedDays':len(days),'lookback':{'targetSessions':15,'dates':dates,'start':dates[0] if dates else None,'end':dates[-1] if dates else None},
+               'benchmark':benchmark,'method':'回溯15个交易日，近3/5日优先；当前异动与题材快照不冒充历史；历史补采仅支持本次判断'}
+    usable = bool(news or any(o.get('domestic') or o.get('foreign') or o.get('flowHistory') for o in observations.values()))
     payload['usable'] = usable
     stamp = now.strftime('%Y-%m-%dT%H%M%S')
-    write_json(directory/'runs'/f'{stamp}.json', payload)
+    write_json(directory/'runs'/f'{stamp}.json',payload)
     if usable:
-        write_json(directory/'history.json', days)
-        write_json(directory/'months'/f'{payload["month"]}.json', state)
-        write_json(directory/'latest.json', payload)
+        write_json(directory/'history.json',days)
+        write_json(directory/'months'/f'{payload["month"]}.json',state)
+        write_json(directory/'latest.json',payload)
     else:
         raise RuntimeError('all sources unavailable; kept last successful latest.json')
-    print(json.dumps({'observedDays': len(days), 'selected': state['selectedId'], 'news': len(merged), 'failures': len(failures)}, ensure_ascii=False))
+    print(json.dumps({'lookback':payload['lookback'],'selected':state['selectedId'],'news':len(merged),'failures':failures},ensure_ascii=False))
     return payload
 
 

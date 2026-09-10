@@ -364,6 +364,7 @@ def collect(root, now):
     directory = root/'data/monthly'
     previous = read_json(directory/'latest.json', {})
     history = read_json(directory/'history.json', [])
+    historical_cache = read_json(directory/'historical-cache.json', {})
     news, failures, source_status = [], [], []
     observations = {t['id']: {} for t in THEMES}
     def status(label, ok, error=None):
@@ -426,8 +427,25 @@ def collect(root, now):
                         raise RuntimeError('国内行情未覆盖最近交易日')
                     data['relative5'] = data['return5']-benchmark['return5']
                 observations[label][kind] = data
+                historical_cache.setdefault(label,{})[kind] = {'data':data,'capturedAt':now.isoformat(),'boardCode':boards[label]['code']}
                 status(label+' '+kind, True)
             except Exception as exc:
+                cached = historical_cache.get(label,{}).get(kind,{})
+                data = cached.get('data')
+                # Reuse only actual history covering the identical latest session.
+                # Never reuse yesterday's incomplete window as today's history.
+                if data and dates and data.get('asOf')==dates[-1] and cached.get('boardCode')==boards[label]['code']:
+                    try:
+                        if kind=='flowHistory':
+                            data = flow_features(data['rows'],dates)
+                        elif data.get('dates') != benchmark['dates']:
+                            raise ValueError('cached calendar differs')
+                        observations[label][kind] = {**data,'cached':True,'capturedAt':cached['capturedAt']}
+                        status(label+' '+kind+'（有效历史缓存）', True)
+                        failures.append(label+' '+kind+': 本次接口失败，使用截至'+data['asOf']+'的已验证历史缓存')
+                        continue
+                    except (KeyError,ValueError,RuntimeError):
+                        pass
                 status(label+' '+kind, False, exc)
     merged = merge_news(previous.get('news',[]),news,now,start)
     current = {'date':now.date().isoformat(),'at':now.isoformat(),'themes':observations,'modelVersion':VERSION}
@@ -447,6 +465,7 @@ def collect(root, now):
     stamp = now.strftime('%Y-%m-%dT%H%M%S')
     write_json(directory/'runs'/f'{stamp}.json',payload)
     if usable:
+        write_json(directory/'historical-cache.json',historical_cache)
         write_json(directory/'history.json',days)
         write_json(directory/'months'/f'{payload["month"]}.json',state)
         write_json(directory/'latest.json',payload)

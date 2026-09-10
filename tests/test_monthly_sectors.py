@@ -114,6 +114,17 @@ class MonthlyTests(unittest.TestCase):
             self.assertTrue(all(r['coverage']['domestic'] for r in p['ranked']))
             self.assertTrue(all(not r['coverage']['flow'] for r in p['ranked']))
             self.assertEqual(len(p['monthState']['events']),0)
+            cache_path=Path(temp)/'data/monthly/historical-cache.json'
+            flow=m.flow_features([{'date':d,'net':10,'ratio':1} for d in dates[1:]],dates[1:])
+            cache={'agriculture':{'flowHistory':{'data':flow,'capturedAt':NOW.isoformat(),'boardCode':'BK1036'}}}
+            m.write_json(cache_path,cache)
+            restored=m.collect(Path(temp),NOW)
+            agriculture=next(r for r in restored['ranked'] if r['id']=='agriculture')
+            self.assertTrue(agriculture['flowHistory']['cached'])
+            cache['agriculture']['flowHistory']['data']['asOf']=dates[-2]
+            m.write_json(cache_path,cache)
+            stale=m.collect(Path(temp),NOW)
+            self.assertFalse(next(r for r in stale['ranked'] if r['id']=='agriculture')['coverage']['flow'])
 
 
 if __name__ == '__main__':

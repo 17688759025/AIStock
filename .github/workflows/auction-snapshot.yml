@@ -37,29 +37,34 @@ jobs:
         with:
           node-version: '22'
       - name: Verify freeze and trading-window invariants
-        run: node --test tests/auction-window.test.cjs
-      - name: Freeze the 09:25 result
+        run: node --test tests/auction-window.test.cjs tests/auction-capture.test.cjs
+      - name: Capture verified auction quotes before optional scoring
         run: |
           if [ "${{ inputs.debug }}" = "true" ]; then
             node scripts/collect_auction_result.cjs --debug
           else
-            node scripts/collect_auction_result.cjs
+            node scripts/collect_auction_result.cjs --capture-only
           fi
+      - name: Persist raw auction capture first
+        if: ${{ inputs.debug != true }}
+        run: bash scripts/publish-auction-data.sh capture
+      - name: Score only from saved auction capture
+        if: ${{ inputs.debug != true }}
+        run: node scripts/collect_auction_result.cjs --score-only
       - name: Commit immutable dated result
         if: ${{ inputs.debug != true }}
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          mkdir -p data/auction
-          git add data/auction
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "Freeze 09:25 auction result $(date +%F)"
-          for attempt in 1 2 3; do
-            git pull --rebase origin main
-            if git push origin main; then exit 0; fi
-            sleep 2
-          done
-          exit 1
+        run: bash scripts/publish-auction-data.sh result
+      - name: Preserve capture and diagnostics even when collection or publishing fails
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: auction-capture-and-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            data/auction/*.capture.json
+            data/auction/*.result.json
+            /tmp/auction-collector-diagnostics.jsonl
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: ${{ inputs.debug == true }}
         with:

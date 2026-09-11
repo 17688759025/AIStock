@@ -42,6 +42,11 @@ def a_share(code):
 def classify_event(title):
     if any(word in title for word in NEGATIVE_WORDS):
         return None
+    # Procedural documents and corrections are not positive catalysts.
+    if any(word in title for word in ('更正', '修订', '法律意见', '核查意见', '审核意见', '债权人会议')):
+        return None
+    if any(word in title for word in ('半年度报告', '年度报告', '季度报告')):
+        return None
     for words, label, score in POSITIVE_EVENTS:
         if any(word in title for word in words):
             return label, score
@@ -128,6 +133,8 @@ def merge_candidates(announcements, limits, risks):
             stock['name'] = row['name']
     output = []
     for stock in merged.values():
+        if 'ST' in stock.get('name', '').upper() or '退' in stock.get('name', ''):
+            continue
         events = sorted(stock.get('events') or [], key=lambda x: x['eventScore'], reverse=True)
         event_score = events[0]['eventScore'] if events else 0
         extra = sum(x['eventScore'] for x in events[1:3]) * .18

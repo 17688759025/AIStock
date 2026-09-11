@@ -19,11 +19,50 @@ function assertCaptureTime(now, date) {
 
 async function mapLimit(items, limit, worker) {
   const result = new Array(items.length);
-  let cursor = 0;
+  let cursor = 0, failed;
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    for (;;) { const i = cursor++; if (i >= items.length) return; result[i] = await worker(items[i], i); }
+    for (;;) {
+      if (failed) return;
+      const i = cursor++; if (i >= items.length) return;
+      try { result[i] = await worker(items[i], i); } catch (e) { failed ||= e; return; }
+    }
   }));
+  // Drain in-flight requests before switching providers or retrying a round.
+  if (failed) throw failed;
   return result;
+}
+
+async function captureWithRetry({ date, deadline, providers, now = Date.now, pause = sleep, report = () => {}, debug = false }) {
+  let round = 0;
+  while (now() < deadline) {
+    round++;
+    for (const [source, collect] of providers) {
+      if (now() >= deadline) break;
+      const start = now();
+      try {
+        const market = await collect(), end = now();
+        if (!debug) { assertCaptureTime(start, date); assertCaptureTime(end, date); }
+        report({ round, source, status: 'captured', rows: market.rows.length });
+        return { market, captureStartedAt: new Date(start).toISOString(), captureCompletedAt: new Date(end).toISOString() };
+      } catch (e) { report({ round, source, status: 'failed', error: e.message }); }
+    }
+    const remaining = deadline - now();
+    if (remaining > 0) await pause(Math.min(remaining, 3000 * Math.min(round, 5)));
+  }
+  throw new Error('Auction capture window exhausted; no valid snapshot captured');
+}
+
+const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function validateCapture(input, date) {
+  if (!input || input.schemaVersion !== 1 || input.kind !== 'auction-capture' || input.debug !== false || input.tradeDate !== date) throw new Error('Invalid saved auction capture');
+  assertCaptureTime(Date.parse(input.captureStartedAt), date);
+  assertCaptureTime(Date.parse(input.captureCompletedAt), date);
+  if (Date.parse(input.captureCompletedAt) < Date.parse(input.captureStartedAt)) throw new Error('Invalid capture interval');
+  const { checksum, ...body } = input;
+  if (checksum !== digest(body)) throw new Error('Saved auction capture checksum mismatch');
+  const rows = input.market?.rows;
+  if (!Array.isArray(rows) || rows.length < 4500 || new Set(rows.map(s=>s.code)).size !== rows.length || rows.some(s=>!/^\d{6}$/.test(s.code))) throw new Error('Incomplete saved auction universe');
+  return input;
 }
 
 function makeRequest(deadline) {
@@ -149,36 +188,65 @@ function writeOnce(file, payload) {
   fs.writeFileSync(file, JSON.stringify(payload), { encoding: 'utf8', flag: 'wx' });
 }
 
-async function main() {
-  const debug = process.argv.includes('--debug'), date = day(), now = new Date();
-  const output = debug ? '/tmp/auction-result-debug.json' : path.join(ROOT, 'data', 'auction', `${date}.result.json`);
-  if (!debug && fs.existsSync(output)) { console.log('Already frozen:', output); return; }
-  if (!debug) {
-    const weekday = new Date(instant(date, '12:00:00')).getUTCDay();
-    if (weekday === 0 || weekday === 6) { console.log('Weekend: no result'); return; }
-    if (+now >= instant(date, '09:30:00')) throw new Error('09:25 auction snapshot was missed; refusing to backfill from intraday quotes');
-    while (Date.now() < instant(date, '09:25:03')) await sleep(Math.min(30000, instant(date, '09:25:03') - Date.now()));
-  }
-  const request = makeRequest(debug ? Date.now() + 240000 : instant(date, '09:29:40'));
-  const runtime = createRuntime({ collectorRequest: request, collectorDate: date });
-  runtime.run(`requestNode=(url,timeout)=>collectorRequest(url,timeout);tradeDateKey=()=>collectorDate;`);
-  const captureStartedAt = new Date().toISOString();
-  let market;
-  try { market = await collectSina(request, runtime, date, debug); }
-  catch (e) { console.log('Sina unavailable:', e.message); market = await collectEastmoney(request, runtime, date, debug); }
-  const captureCompletedAt = new Date().toISOString();
-  if (!debug) { assertCaptureTime(new Date(captureStartedAt), date); assertCaptureTime(new Date(captureCompletedAt), date); }
-  const premarket = await loadPremarket(request, date);
-  const result = await buildResult(runtime, market, premarket, { tradeDate: date, captureStartedAt, captureCompletedAt });
-  result.generatedAt = new Date().toISOString();result.debug = debug;
-  result.snapshotId = crypto.createHash('sha256').update(JSON.stringify(result)).digest('hex');
-  if (!debug) {
-    if (Date.now() >= instant(date, '09:30:00')) throw new Error('Result missed the pre-open publication deadline');
-    runtime.context.resultToValidate = result;runtime.run('validateFrozenAuction(resultToValidate)');
-    writeOnce(output, result);
-  } else fs.writeFileSync(output, JSON.stringify(result));
-  console.log(JSON.stringify({ output, snapshotId: result.snapshotId, source: result.source, counts: Object.fromEntries(Object.entries(result.universes).map(([k,v])=>[k,{scanned:v.scannedCount,picks:v.picks.length,history:v.historyReady,funds:v.fundReady}])) }));
+function record(event) {
+  const file = '/tmp/auction-collector-diagnostics.jsonl';
+  const entry = { at: new Date().toISOString(), ...event };
+  console.log(JSON.stringify(entry));
+  fs.appendFileSync(file, JSON.stringify(entry)+'\n');
 }
 
-module.exports = { assertCaptureTime, buildResult, writeOnce, mapLimit, makeRequest };
-if (require.main === module) main().catch(e => { console.error(e); process.exitCode = 1; });
+async function main() {
+  const debug = process.argv.includes('--debug'), captureOnly = process.argv.includes('--capture-only'), scoreOnly = process.argv.includes('--score-only');
+  const date = day(), now = new Date();
+  const output = debug ? '/tmp/auction-result-debug.json' : path.join(ROOT, 'data', 'auction', date+'.result.json');
+  const inputFile = path.join(ROOT, 'data', 'auction', date+'.capture.json');
+  if (captureOnly && scoreOnly || debug && (captureOnly || scoreOnly)) throw Error('Conflicting collector modes');
+  if (!debug && fs.existsSync(output)) { record({ phase:'skip', reason:'Already frozen', output }); return; }
+  const weekday = new Date(instant(date, '12:00:00')).getUTCDay();
+  if (!debug && (weekday === 0 || weekday === 6)) { record({ phase:'skip', reason:'Weekend' }); return; }
+  let input;
+  if (!debug && fs.existsSync(inputFile)) {
+    input = validateCapture(JSON.parse(fs.readFileSync(inputFile, 'utf8')), date);
+    record({ phase:'resume', inputFile });
+  } else {
+    if (scoreOnly) throw Error('No saved capture; scoring cannot fetch replacement quotes');
+    if (!debug && +now >= instant(date, '09:30:00')) throw Error('09:25 auction snapshot was missed; refusing to backfill from intraday quotes');
+    if (!debug) while (Date.now() < instant(date, '09:25:03')) await sleep(Math.min(30000, instant(date, '09:25:03') - Date.now()));
+    const deadline = debug ? Date.now()+240000 : instant(date, '09:29:40');
+    const request = makeRequest(deadline), runtime = createRuntime();
+    record({ phase:'capture', status:'starting' });
+    const captured = await captureWithRetry({
+      date, deadline, debug, report:e=>record({phase:'capture', ...e}),
+      providers:[
+        ['Sina', ()=>collectSina(request, runtime, date, debug)],
+        ['Eastmoney', ()=>collectEastmoney(request, runtime, date, debug)],
+      ],
+    });
+    // Persist the verified, unscored market BEFORE optional enrichment.
+    input = { schemaVersion:1, kind:'auction-capture', tradeDate:date, debug, ...captured };
+    input.checksum = digest(input);
+    if (!debug) { validateCapture(input,date); writeOnce(inputFile,input); }
+    record({ phase:'capture', status:'saved', inputFile:debug?null:inputFile });
+  }
+  if (captureOnly) return;
+  record({ phase:'score', status:'starting' });
+  const scoreDeadline = Date.now()+600000, request = makeRequest(scoreDeadline);
+  const runtime = createRuntime({collectorRequest:request,collectorDate:date});
+  runtime.run(`requestNode=(url,timeout)=>collectorRequest(url,timeout);fetchJson=requestNode;tradeDateKey=()=>collectorDate;`);
+  const premarket = await loadPremarket(request,date);
+  const result = await buildResult(runtime, structuredClone(input.market), premarket, {
+    tradeDate:date, captureStartedAt:input.captureStartedAt, captureCompletedAt:input.captureCompletedAt,
+    captureChecksum:input.checksum, scoringBasis:'saved-auction-capture',
+  });
+  result.generatedAt = new Date().toISOString(); result.debug = debug;
+  result.snapshotId = digest(result);
+  if (!debug) {
+    // Publication may be late; only quote timestamps must precede 09:30.
+    runtime.context.resultToValidate=result;runtime.run('validateFrozenAuction(resultToValidate)');
+    writeOnce(output,result);
+  } else fs.writeFileSync(output,JSON.stringify(result));
+  record({phase:'score',status:'saved',output,snapshotId:result.snapshotId});
+}
+
+module.exports = { assertCaptureTime, buildResult, writeOnce, mapLimit, makeRequest, captureWithRetry, validateCapture, digest };
+if (require.main === module) main().catch(e => { record({phase:'fatal',error:e.message});console.error(e);process.exitCode=1; });

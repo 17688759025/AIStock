@@ -12,11 +12,11 @@
 </head>
 <body><div class="wrap">
 <header class="top"><div><div class="eyebrow">AI STOCK SIGNAL · A-SHARE</div><h1 id="pageTitle">竞价风向标</h1><div id="pageSub" class="sub"></div></div><div class="actions"><span id="marketStatus" class="status wait"></span><a class="btn" href="monthly-sectors.html">月度板块</a><a class="btn" href="close-history.html">尾盘历史</a><label class="btn" style="display:flex;align-items:center;gap:7px;cursor:pointer"><input id="mainBoardOnly" type="checkbox" checked style="accent-color:#8174ff">仅主板</label><button id="refreshBtn" class="btn primary">刷新实时数据</button></div></header>
-<nav class="tabs" aria-label="推票板块"><button class="tab active" data-mode="auction">竞价风向标</button><button class="tab" data-mode="intraday">盘中半点推票</button><button class="tab" data-mode="close">尾盘狙击</button></nav>
+<nav class="tabs" aria-label="推票板块"><button class="tab active" data-mode="auction">竞价风向标</button><button class="tab" data-mode="intraday">盘中半点推票</button><button class="tab" data-mode="close">尾盘狙击</button><button class="tab" data-mode="rightside">右侧趋势</button></nav>
 <div class="notice">⚠️ <strong>信息提示：</strong>本页面只展示公开接口返回的数据和可解释的启发式排序，不构成投资建议或买卖依据，不会自动下单。</div>
 <section class="grid kpis"><div class="card"><div id="scanLabel" class="label">扫描股票</div><div id="scanned" class="value">—</div><div id="scanHint" class="hint">全市场接口返回数量</div></div><div class="card"><div id="candidateLabel" class="label"></div><div id="candidates" class="value">—</div><div id="candidateHint" class="hint"></div></div><div class="card"><div id="averageLabel" class="label"></div><div id="avgChange" class="value">—</div><div class="hint">当前 Top 5 均值</div></div><div class="card"><div class="label">优先观察</div><div id="recommendCount" class="value">—</div><div class="hint">综合评分最高的 1–3 只</div></div></section>
 <section id="premarketPanel" class="panel event-panel"><div class="head"><div><div class="ptitle">盘前事件 × 竞价确认</div><div id="premarketNote" class="note">08:50生成候选，09:25竞价确认后只选1只或0只</div></div><div class="note">同属竞价风向标</div></div><div id="premarketPick" class="event-body"><div class="empty">等待盘前候选与竞价数据…</div></div></section>
-<main class="grid main"><section class="panel"><div class="head result-head"><div><div id="listTitle" class="ptitle"></div><div id="dataNote" class="note">等待加载…</div></div><div id="listNote" class="note"></div></div><div class="table-wrap"><table class="stock-table"><thead><tr><th>#</th><th>股票</th><th id="changeHead"></th><th>实时涨跌</th><th>量能</th><th id="trendHead"></th><th>板块竞价分</th><th>综合分</th></tr></thead><tbody id="stockBody"></tbody></table></div></section>
+<main class="grid main"><section class="panel"><div class="head result-head"><div><div id="listTitle" class="ptitle"></div><div id="dataNote" class="note">等待加载…</div></div><div id="listNote" class="note"></div></div><div class="table-wrap"><table id="mainStockTable" class="stock-table"><thead><tr><th>#</th><th>股票</th><th id="changeHead"></th><th>实时涨跌</th><th>量能</th><th id="trendHead"></th><th>板块竞价分</th><th>综合分</th></tr></thead><tbody id="stockBody"></tbody></table></div></section>
 <aside class="right"><section class="panel"><div class="head"><div class="ptitle">优先观察（1–3）</div><div class="note">仅供复核</div></div><div id="recList" class="rec-list"></div></section><section class="panel"><div class="head"><div class="ptitle">评分因子</div><div class="note">当前权重</div></div><div id="factors" class="factors"></div></section><section class="panel"><div class="head"><div class="ptitle">计算逻辑</div></div><div id="formula" class="formula"></div></section><section class="panel"><div class="head"><div class="ptitle">数据源与状态</div><div id="sourceMode" class="note">待加载</div></div><div class="sources"><div class="source-row"><span>08:50盘前候选</span><span>GitHub Actions · 公告 + 昨日涨停</span></div><div class="source-row"><span>竞价全市场</span><span>09:25 固定名单 · 实时涨跌独立刷新</span></div><div class="source-row"><span>竞价共享快照</span><span>GitHub Actions · 09:25；缺失时本机重建</span></div><div class="source-row"><span>尾盘共享快照</span><span>GitHub Actions · 14:30；缺失时本机补算</span></div><div class="source-row"><span>盘中候选池</span><span>东方财富信号 → 新浪排行 → 缓存</span></div><div class="source-row"><span>分时验证</span><span>东方财富多节点 → 腾讯分时</span></div><div class="source-row"><span>更新时间</span><span id="updatedAt">—</span></div></div></section></aside></main>
 <div class="foot">竞价与尾盘均优先读取当日共享快照；正式文件错过时，刷新可根据仍可验证的固定价格字段在当前浏览器重建一次并冻结，降级结果不进入共享历史。盘中按最多30个实际交易分钟动态计算，早盘不足时缩短，午后跨午休拼接早盘。行情刷新失败时保留已展示结果，并标明更新时间。</div>
 </div>
@@ -317,13 +317,14 @@ function prepareAuctionScores(list){const ready=list.filter(s=>s.historyReady),p
 function isNearLimit(s){const c=String(s.code||''),limit=/^(8|9)/.test(c)?29.8:/^(30|68)/.test(c)?19.8:9.8;return s.currentChange>=limit}
 function rank(list){if((mode==='auction'&&list.every(s=>s.frozenAuction||s.recoveredAuction))||(mode==='close'&&list.every(s=>s.frozenClose||s.recoveredClose)))return list.slice(0,FINAL_LIMIT);const ranked=list.filter(s=>mode==='auction'?s.meetsTarget:!isNearLimit(s)).map(s=>({...s,score:calcScore(s),nearLimit:false})).sort((a,b)=>b.score-a.score||(String(a.code)<String(b.code)?-1:String(a.code)>String(b.code)?1:0));return ranked.filter(s=>mode==='auction'||mode==='close'||s.windowChange>0).slice(0,FINAL_LIMIT)}
 function spark(v){const w=88,h=26,p=2,min=Math.min(...v),max=Math.max(...v),r=max-min||1,pts=v.map((x,i)=>`${p+i*(w-p*2)/Math.max(1,v.length-1)},${h-p-(x-min)*(h-p*2)/r}`).join(' ');return `<svg class="spark" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="#74a5ff" stroke-width="2" stroke-linecap="round"/></svg>`}
-function render(){const d=MODES[mode];stocks=rank(stocks);$('stockBody').innerHTML=stocks.length?stocks.map((s,i)=>{const ch=mode==='auction'?s.auction:s.windowChange,rt=Number(s.currentChange)||0,unit=mode==='auction'?(s.volumeUnit||'x'):'x',sector=validSectorName(s.sector)?s.sector:'—',sectorScore=Number.isFinite(s.sectorScore)?Math.round(s.sectorScore):'—';return `<tr data-code="${s.code}" class="${s.code===selectedCode?'selected':''}"><td class="rank">${i+1}</td><td><div class="name">${s.name}<span class="tag">${sector}</span></div><div class="code">${s.code}</div></td><td class="num ${ch>=0?'up':'down'}">${ch>=0?'+':''}${ch.toFixed(2)}%</td><td class="num ${rt>=0?'up':'down'}">${rt>=0?'+':''}${rt.toFixed(2)}%</td><td><div class="bar"><i style="width:${clamp((mode==='auction'?s.volume:s.windowVolume)*30,10)}%"></i></div><div class="code">${(mode==='auction'?s.volume:s.windowVolume).toFixed(2)}${unit}</div></td><td>${spark(s.trend)}</td><td class="num">${sectorScore}</td><td class="score">${s.score}</td></tr>`}).join(''):`<tr><td colspan="8"><div class="empty">${mode!=='intraday'?'今日冻结名单为空或尚未发布，请查看上方状态。':'当前交易窗口内暂无有效候选，请查看上方状态。'}</div></td></tr>`;document.querySelectorAll('#stockBody tr[data-code]').forEach(r=>r.onclick=()=>{selectedCode=r.dataset.code;render();renderRec()});$('scanned').textContent=totalCount?totalCount.toLocaleString():'—';$('candidates').textContent=stocks.length?stocks.length+' 只':'—';const vals=stocks.map(s=>mode==='auction'?s.auction:s.windowChange);$('avgChange').textContent=vals.length?(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)+'%':'—';$('recommendCount').textContent=stocks.length?Math.min(3,stocks.length)+' 只':'—';renderRec()}
+function render(){if(mode==='rightside'){renderRightSide();return}const d=MODES[mode];stocks=rank(stocks);$('stockBody').innerHTML=stocks.length?stocks.map((s,i)=>{const ch=mode==='auction'?s.auction:s.windowChange,rt=Number(s.currentChange)||0,unit=mode==='auction'?(s.volumeUnit||'x'):'x',sector=validSectorName(s.sector)?s.sector:'—',sectorScore=Number.isFinite(s.sectorScore)?Math.round(s.sectorScore):'—';return `<tr data-code="${s.code}" class="${s.code===selectedCode?'selected':''}"><td class="rank">${i+1}</td><td><div class="name">${s.name}<span class="tag">${sector}</span></div><div class="code">${s.code}</div></td><td class="num ${ch>=0?'up':'down'}">${ch>=0?'+':''}${ch.toFixed(2)}%</td><td class="num ${rt>=0?'up':'down'}">${rt>=0?'+':''}${rt.toFixed(2)}%</td><td><div class="bar"><i style="width:${clamp((mode==='auction'?s.volume:s.windowVolume)*30,10)}%"></i></div><div class="code">${(mode==='auction'?s.volume:s.windowVolume).toFixed(2)}${unit}</div></td><td>${spark(s.trend)}</td><td class="num">${sectorScore}</td><td class="score">${s.score}</td></tr>`}).join(''):`<tr><td colspan="8"><div class="empty">${mode!=='intraday'?'今日冻结名单为空或尚未发布，请查看上方状态。':'当前交易窗口内暂无有效候选，请查看上方状态。'}</div></td></tr>`;document.querySelectorAll('#stockBody tr[data-code]').forEach(r=>r.onclick=()=>{selectedCode=r.dataset.code;render();renderRec()});$('scanned').textContent=totalCount?totalCount.toLocaleString():'—';$('candidates').textContent=stocks.length?stocks.length+' 只':'—';const vals=stocks.map(s=>mode==='auction'?s.auction:s.windowChange);$('avgChange').textContent=vals.length?(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2)+'%':'—';$('recommendCount').textContent=stocks.length?Math.min(3,stocks.length)+' 只':'—';renderRec()}
 function renderRec(){const r=stocks.slice(0,3);$('recList').innerHTML=r.length?r.map((s,i)=>{const ch=mode==='auction'?s.auction:s.windowChange,vol=mode==='auction'?s.volume:s.windowVolume,volUnit=mode==='auction'?(s.volumeUnit||'x'):'x',relative=mode==='auction'?(Number(s.currentChange)||0)-s.auction:null,sector=validSectorName(s.sector)?s.sector:'板块未知',sectorScore=Number.isFinite(s.sectorScore)?Math.round(s.sectorScore):'—',signalText=(s.signals||[]).join(' · ')||'分时趋势';return `<article class="rec"><div class="rec-top"><div><div class="rec-name">${s.name} <span class="code">${s.code}</span></div><div class="rec-rank">优先观察 · No.${i+1}</div></div><div class="rec-score">${s.score} 分</div></div><div class="reason">${mode==='auction'?'竞价':'区间'} ${ch>=0?'+':''}${ch.toFixed(2)}%，量能 ${vol.toFixed(2)}${volUnit}；趋势${s.trend.at(-1)>=s.trend[0]?'向上':'偏弱'}，${sector}强度 ${sectorScore}。</div><div><span class="chip">置信度 ${s.confidence||'—'}%</span><span class="chip">${signalText}</span>${mode==='auction'?`<span class="chip">较竞价 ${relative>=0?'+':''}${relative.toFixed(2)}%</span>`:`<span class="chip">主力净流入 ${(s.mainFlow/100000000).toFixed(2)}亿</span><span class="chip">涨速 ${(s.speed||0).toFixed(2)}%</span>`}<span class="chip">换手 ${s.turnover.toFixed(2)}%</span></div><div class="risk">综合分与置信度表示数据和信号质量，不代表上涨概率；价格与消息面仍可能快速变化。</div></article>`}).join(''):'<div class="empty">暂无实时数据，暂不生成观察名单。</div>'}
-function applyMode(){const d=MODES[mode];$('pageTitle').textContent=d.title;$('pageSub').textContent=d.sub;$('scanLabel').textContent=mode==='auction'?'扫描股票':'信号候选池';$('scanHint').textContent=mode==='auction'?'全市场接口返回数量':'资金流 Top200 ∪ 涨速 Top100 ∪ 看多异动';$('candidateLabel').textContent=d.candidate;$('candidateHint').textContent=d.hint;$('averageLabel').textContent=d.average;$('listTitle').textContent=d.list;$('changeHead').textContent=d.change;$('trendHead').textContent=d.trend;$('listNote').textContent=d.note;$('factors').innerHTML=d.factors.map(([n,w])=>`<div class="factor"><div class="factor-line"><span>${n}</span><span>${w}%</span></div><div class="factor-track"><i style="width:${w*2.4}%"></i></div></div>`).join('');$('formula').innerHTML='这是可解释的启发式排序，并非收益预测。<code>综合分 = '+d.factors.map(x=>x[0]+'×'+x[1]+'%').join(' + ')+'</code>';document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.mode===mode));renderPremarket();clock()}
-function allowed(){const t=hhmm();if(mode==='auction')return t>=925;if(mode==='intraday')return!!tradingWindow();return t>=1430}
-function clock(){const ok=allowed();$('marketStatus').className=ok?'status':'status wait';if(mode==='auction')$('marketStatus').textContent=ok?'读取当日 09:25 冻结结果':'等待 09:25 竞价结束';else if(mode==='intraday'){const w=tradingWindow();$('marketStatus').textContent=w?(w.paused?'休市 · 截至 '+minuteLabel(w.asOf):'前 '+w.duration+' 个交易分钟')+' · 可查询':'等待当日开盘后的交易数据'}else $('marketStatus').textContent=ok?'读取当日 14:30 冻结结果':'等待 14:30'}
+function applyMode(){const d=MODES[mode];$('pageTitle').textContent=d.title;$('pageSub').textContent=d.sub;$('scanLabel').textContent=mode==='auction'?'扫描股票':'信号候选池';$('scanHint').textContent=mode==='auction'?'全市场接口返回数量':'资金流 Top200 ∪ 涨速 Top100 ∪ 看多异动';$('candidateLabel').textContent=d.candidate;$('candidateHint').textContent=d.hint;$('averageLabel').textContent=d.average;$('listTitle').textContent=d.list;$('changeHead').textContent=d.change;$('trendHead').textContent=d.trend;$('listNote').textContent=d.note;$('factors').innerHTML=d.factors.map(([n,w])=>`<div class="factor"><div class="factor-line"><span>${n}</span><span>${w}%</span></div><div class="factor-track"><i style="width:${w*2.4}%"></i></div></div>`).join('');$('formula').innerHTML='这是可解释的启发式排序，并非收益预测。<code>综合分 = '+d.factors.map(x=>x[0]+'×'+x[1]+'%').join(' + ')+'</code>';document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.mode===mode));applyRightHeaders();renderPremarket();clock()}
+function allowed(){if(mode==='rightside')return true;const t=hhmm();if(mode==='auction')return t>=925;if(mode==='intraday')return!!tradingWindow();return t>=1430}
+function clock(){const ok=allowed();$('marketStatus').className=ok?'status':'status wait';if(mode==='rightside'){$('marketStatus').textContent='已收盘日线 · 可查询';return}if(mode==='auction')$('marketStatus').textContent=ok?'读取当日 09:25 冻结结果':'等待 09:25 竞价结束';else if(mode==='intraday'){const w=tradingWindow();$('marketStatus').textContent=w?(w.paused?'休市 · 截至 '+minuteLabel(w.asOf):'前 '+w.duration+' 个交易分钟')+' · 可查询':'等待当日开盘后的交易数据'}else $('marketStatus').textContent=ok?'读取当日 14:30 冻结结果':'等待 14:30'}
 async function refresh(){
  const generation=++refreshGeneration,requestedMode=mode,requestedMain=mainOnly,date=tradeDateKey(),current=()=>generation===refreshGeneration&&mode===requestedMode&&mainOnly===requestedMain&&tradeDateKey()===date;
+ if(requestedMode==='rightside'){await refreshRightSide(current,requestedMain);return}
  if(frozenAuction&&frozenAuction.tradeDate!==date){frozenAuction=null;liveAuctionChanges=new Map();stocks=[];premarketPick=null;premarketState='等待今日09:25结果';renderPremarket()}
  if(frozenClose&&frozenClose.tradeDate!==date){frozenClose=null;liveCloseChanges=new Map();if(requestedMode==='close')stocks=[]}
  if(!allowed()){$('dataNote').textContent=mode==='auction'?'等待09:25正式竞价结果':mode==='close'?'尾盘狙击将在14:30后开放':'等待开盘后的交易分钟数据';stocks=[];render();$('refreshBtn').disabled=false;return}
@@ -402,6 +403,115 @@ async function refreshDelayedPremarket(current=()=>true){
   delayedObservation=partial?null:{key,pick:structuredClone(premarketPick),state:premarketState};renderPremarket();
  }catch(e){if(current()){premarketState='等待延迟观察：'+e.message;renderPremarket()}}
 }
+const RIGHT_VERSION='rightside-v1';
+MODES.rightside={title:'右侧趋势',sub:'已收盘日线：连续至少4日上涨，或近5日至少4日上涨；均线向上，最多观察5只',candidate:'趋势合格候选',hint:'非全市场 · 以收盘价较昨收上涨为红盘',average:'平均近5日涨幅',list:'右侧趋势 Top 5',change:'近5日涨幅',trend:'近20日收盘走势',note:'只用已收盘日线，不计未收盘当日',factors:[['上涨持续性',30],['均线结构',25],['回撤控制',20],['量能配合',15],['收盘位置',10]]};
+let rightMeta=null;
+function rightClosedBars(rows,date=tradeDateKey(),minutes=marketParts().minutes){
+ const seen=new Map();
+ for(const b of rows){if(/^\d{4}-\d{2}-\d{2}$/.test(b.date)&&b.date<=date&&(b.date<date||minutes>=910)&&[b.open,b.close,b.high,b.low,b.volume].every(Number.isFinite)&&b.open>0&&b.close>0&&b.low>0&&b.high>=Math.max(b.open,b.close)&&b.low<=Math.min(b.open,b.close)&&b.volume>=0)seen.set(b.date,b)}
+ return [...seen.values()].sort((a,b)=>a.date.localeCompare(b.date));
+}
+function evaluateRightSide(s,bars,calendar){
+ const rows=rightClosedBars(bars),last=rows.at(-1),reasons=[];
+ if(/ST|退/i.test(s.name||''))return null;
+ if(rows.length<25||!calendar.length||last.date!==calendar.at(-1)||!last.volume)return null;
+ // A suspension must not be hidden by counting only the ticker's own bars.
+ if(rows.slice(-6).map(b=>b.date).join()!==calendar.slice(-6).join())return null;
+ const n=rows.length,avg=a=>a.reduce((x,y)=>x+y,0)/a.length;
+ const ma=(count,offset=0)=>avg(rows.slice(n-count-offset,n-offset).map(x=>x.close));
+ const changes=rows.slice(1).map((b,i)=>(b.close/rows[i].close-1)*100);
+ let streak=0;for(let i=changes.length-1;i>=0&&changes[i]>0;i--)streak++;
+ const red5=changes.slice(-5).filter(x=>x>0).length,red10=changes.slice(-10).filter(x=>x>0).length;
+ const ma5=ma(5),ma10=ma(10),ma20=ma(20),gain5=(last.close/rows[n-6].close-1)*100;
+ if(!(streak>=4||red5>=4)||!(last.close>=ma5&&ma5>ma10&&ma10>ma20&&ma5>ma(5,1))||gain5<=0)return null;
+ const lastChange=changes.at(-1);if(isNearLimit({...s,currentChange:lastChange}))return null;
+ let peak=0,drawdown=0;for(const b of rows.slice(-10)){peak=Math.max(peak,b.close);drawdown=Math.max(drawdown,(peak-b.close)/peak*100)}
+ const relVolume=avg(rows.slice(-5).map(b=>b.volume))/Math.max(1,avg(rows.slice(-10,-5).map(b=>b.volume)));
+ const bias5=(last.close/ma5-1)*100,span=last.high-last.low,closePos=span>0?(last.close-last.low)/span:1,upper=span>0?(last.high-Math.max(last.open,last.close))/span:0;
+ const factors={continuity:clamp(red5*15+Math.min(streak,5)*5),trend:clamp(70+(ma5/ma10-1)*500),drawdown:clamp(100-drawdown*12),volume:clamp(100-Math.abs(relVolume-1.3)*45),position:closePos*100};
+ let penalty=0;
+ if(bias5>8){penalty+=(bias5-8)*1.5;reasons.push('偏离MA5 '+bias5.toFixed(1)+'%，追高风险')}
+ if(gain5>18){penalty+=(gain5-18)*.7;reasons.push('近5日涨幅偏快')}
+ if(upper>.4){penalty+=10;reasons.push('末日上影偏长')}
+ if(relVolume>2.5&&lastChange<1){penalty+=10;reasons.push('放量但末日涨幅不足1%')}
+ const score=Math.round(clamp(factors.continuity*.3+factors.trend*.25+factors.drawdown*.2+factors.volume*.15+factors.position*.1-penalty));
+ return {...s,score,rightReady:true,asOf:last.date,lastChange,streak,red5,red10,gain5,ma5,ma10,ma20,drawdown,relVolume,bias5,factors,risks:reasons,trend:rows.slice(-20).map(b=>b.close)};
+}
+async function rightTencentBars(code){
+ const key=(code.startsWith('6')?'sh':/^[489]/.test(code)?'bj':'sz')+code;
+ const j=await requestNode('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param='+encodeURIComponent(key+',day,,,70,qfq'),6500),d=j?.data?.[key];
+ if(!Array.isArray(d?.qfqday))throw Error('腾讯前复权日线缺失');
+ return d.qfqday.map(r=>({date:r[0],open:Number(r[1]),close:Number(r[2]),high:Number(r[3]),low:Number(r[4]),volume:Number(r[5])}));
+}
+async function rightEastmoneyBars(code,index=false){
+ const id=index?'1.000001':/^[489]/.test(code)?'0.'+code:secid(code);
+ const j=await requestNode('https://push2his.eastmoney.com/api/qt/stock/kline/get?secid='+id+'&klt=101&fqt='+(index?0:1)+'&lmt=70&end=20500101&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',6500);
+ if(!j?.data?.klines?.length)throw Error('东财日线缺失');return j.data.klines.map(parseDailyKline);
+}
+async function loadRightCalendar(){
+ let bars;try{bars=await rightEastmoneyBars('000001',true)}catch(e){const j=await requestNode('https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000001,day,,,70,qfq',6500),d=j?.data?.sh000001;bars=(d?.day||d?.qfqday||[]).map(r=>({date:r[0],open:+r[1],close:+r[2],high:+r[3],low:+r[4],volume:+r[5]}))}
+ const rows=rightClosedBars(bars);if(rows.length<25)throw Error('交易日历日线不足');
+ if(Date.parse(tradeDateKey())-Date.parse(rows.at(-1).date)>12*86400000)throw Error('交易日历数据过旧');
+ return rows.map(b=>b.date);
+}
+async function loadRightSeeds(main){
+ const lists=[],failures=[];
+ for(const [fid,label] of [['f6','成交额'],['f3','涨幅']]){
+  for(let page=1;page<=2;page++){
+   try{const j=await requestNode('https://push2.eastmoney.com/api/qt/clist/get?pz=100&po=1&np=1&fltt=2&invt=2&fid='+fid+'&pn='+page+'&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&fields=f6,f12,f14,f3,f8,f10,f17,f18,f100',5000);const raw=Object.values(j?.data?.diff||{});if(!raw.length)throw Error('空排行');lists.push(...normalize(raw))}catch(e){failures.push(label+'第'+page+'页失败')}
+  }
+ }
+ let source='东财成交额/涨幅Top200并集';
+ if(!lists.length){source='新浪成交额/涨幅排行';for(const sort of ['amount','changepercent'])for(let page=1;page<=2;page++){
+  try{const raw=await requestNode('https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?num=80&sort='+sort+'&asc=0&node=hs_a&page='+page,5000);if(!Array.isArray(raw)||!raw.length)throw Error('空排行');lists.push(...normalizeSina(raw))}catch(e){failures.push('新浪'+sort+'第'+page+'页失败')}
+ }}
+ const rows=stableStocks(lists).filter(s=>(!main||isMainBoard(s))&&!/ST|退/i.test(s.name));
+ if(!rows.length)throw Error('右侧候选排行均未返回有效数据，请稍后重试');
+ return {rows,source,failures};
+}
+async function loadRightBars(s,calendar){
+ const asOf=calendar.at(-1),key=RIGHT_VERSION+'|'+s.code+'|'+asOf;
+ try{const c=JSON.parse(localStorage.getItem(key));if(c&&Date.now()-c.time<30*60000&&c.rows?.at(-1)?.date===asOf)return c}catch(e){}
+ let result;
+ for(const [source,load] of [['Eastmoney',rightEastmoneyBars],['Tencent',rightTencentBars]]){
+  try{const rows=rightClosedBars(await load(s.code));if(rows.length<25||rows.at(-1).date!==asOf)throw Error('日线不足或未更新');result={rows,source,time:Date.now()};break}catch(e){}
+ }
+ if(!result)throw Error('双源日线缺失或尚未更新');
+ try{localStorage.setItem(key,JSON.stringify(result))}catch(e){}return result;
+}
+async function refreshRightSide(current,main){
+ $('refreshBtn').disabled=true;clock();$('dataNote').textContent='正在校验最近已收盘交易日与候选池…';
+ try{
+  const calendar=await loadRightCalendar();if(!current())return;
+  const seed=await loadRightSeeds(main);if(!current())return;
+  const qualified=[];let completed=0,failed=0,cursor=0;
+  await Promise.all(Array.from({length:4},async()=>{
+   while(current()){
+    const i=cursor++;if(i>=seed.rows.length)return;
+    try{const history=await loadRightBars(seed.rows[i],calendar);const s=evaluateRightSide(seed.rows[i],history.rows,calendar);if(s)qualified.push({...s,dailySource:history.source})}catch(e){failed++}
+    completed++;if(current())$('dataNote').textContent='正在验证已收盘日线 '+completed+'/'+seed.rows.length+' · 符合趋势 '+qualified.length+' · 日线失败 '+failed;
+   }
+  }));
+  if(!current())return;
+  if(failed===seed.rows.length)throw Error('全部候选日线获取失败，请稍后重试');
+  stocks=qualified.sort((a,b)=>b.score-a.score||b.streak-a.streak||a.code.localeCompare(b.code)).slice(0,5);
+  rightMeta={asOf:calendar.at(-1),count:seed.rows.length,qualified:qualified.length,failed,source:seed.source,failures:seed.failures};
+  $('dataNote').textContent='日线截至 '+rightMeta.asOf+' · '+seed.source+' · 非全市场 · 检查 '+seed.rows.length+'，符合 '+qualified.length+'，日线失败 '+failed+(seed.failures.length?' · 部分排行缺失':'')+'；展示最多5只';
+  $('sourceMode').textContent='日线：东财 → 腾讯前复权';$('updatedAt').textContent=new Date().toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai'});renderRightSide();
+ }catch(e){if(current()){$('dataNote').textContent=e.message+(stocks.length?'；保留上次成功结果（日线截至 '+rightMeta?.asOf+'）':'');renderRightSide()}}
+ finally{if(current())$('refreshBtn').disabled=false}
+}
+function renderRightSide(){
+ const pct=n=>(n>=0?'+':'')+n.toFixed(2)+'%';
+ $('stockBody').innerHTML=stocks.length?stocks.map((s,i)=>'<tr><td>'+(i+1)+'</td><td><strong>'+esc(s.name)+'</strong><div class="code">'+esc(s.code)+' · '+esc(s.asOf)+'</div></td><td class="up">'+pct(s.gain5)+'</td><td class="'+(s.lastChange>=0?'up':'down')+'">'+pct(s.lastChange)+'</td><td>'+s.relVolume.toFixed(2)+'x</td><td>'+spark(s.trend)+'</td><td>连涨 '+s.streak+'日<br>5日 '+s.red5+'/5</td><td class="score">'+s.score+'</td></tr>').join(''):'<tr><td colspan="8" class="empty">暂无符合已收盘日线条件的候选，请查看上方扫描状态。</td></tr>';
+ $('scanned').textContent=rightMeta?.count??'—';$('candidates').textContent=rightMeta?rightMeta.qualified+' 只':'—';$('avgChange').textContent=stocks.length?pct(stocks.reduce((n,s)=>n+s.gain5,0)/stocks.length):'—';$('recommendCount').textContent=stocks.length?Math.min(3,stocks.length)+' 只':'—';
+ $('recList').innerHTML=stocks.slice(0,3).map(s=>'<article class="rec"><div class="rec-top"><strong>'+esc(s.name)+' '+esc(s.code)+'</strong><span class="rec-score">'+s.score+' 分</span></div><div class="reason">日线截至 '+esc(s.asOf)+' · '+esc(s.dailySource)+'<br>连涨 '+s.streak+'日；近5日红盘 '+s.red5+'/5，近10日 '+s.red10+'/10<br>MA5 / MA10 / MA20：'+[s.ma5,s.ma10,s.ma20].map(x=>x.toFixed(2)).join(' / ')+'<br>近10日收盘最大回撤 '+s.drawdown.toFixed(2)+'%，近5日量能比 '+s.relVolume.toFixed(2)+'x</div><div class="risk">'+esc(s.risks.join('；')||'趋势可能中断，仍需防范追高与回撤')+'。评分不代表上涨概率。</div></article>').join('')||'<div class="empty">暂无趋势观察票</div>';
+}
+function applyRightHeaders(){
+ const headers=document.querySelectorAll('#mainStockTable thead th');
+ if(headers.length>=8){headers[3].textContent=mode==='rightside'?'末日涨跌':'实时涨跌';headers[4].textContent=mode==='rightside'?'5日量能比':'量能';headers[6].textContent=mode==='rightside'?'红盘持续性':'板块竞价分'}
+ if(mode==='rightside'){$('scanLabel').textContent='日线验证候选池';$('scanHint').textContent='成交额/涨幅排行并集，非全市场';$('formula').innerHTML='红盘按收盘价高于昨收计算；连续≥4日或近5日≥4日上涨，并满足收盘≥MA5>MA10>MA20且MA5上行。只用已收盘前复权日线，15:10后才纳入当日。<code>持续性30% + 均线25% + 回撤20% + 量能15% + 收盘位置10% − 追高/上影/滞涨惩罚</code>排行候选池可能漏掉其他趋势股；日线失败单独统计，不视为筛选不合格。'}
+}
 // Browser startup
-document.querySelectorAll('.tab').forEach(x=>x.onclick=()=>{refreshGeneration++;mode=x.dataset.mode;selectedCode=null;stocks=[];applyMode();render();refresh()});$('mainBoardOnly').onchange=e=>{refreshGeneration++;mainOnly=e.target.checked;selectedCode=null;stocks=[];render();refresh()};$('refreshBtn').onclick=refresh;applyMode();setInterval(clock,1000);refresh();
+document.querySelectorAll('.tab').forEach(x=>x.onclick=()=>{refreshGeneration++;mode=x.dataset.mode;selectedCode=null;stocks=[];rightMeta=null;applyMode();render();refresh()});$('mainBoardOnly').onchange=e=>{refreshGeneration++;mainOnly=e.target.checked;selectedCode=null;stocks=[];rightMeta=null;render();refresh()};$('refreshBtn').onclick=refresh;applyMode();setInterval(clock,1000);refresh();
 </script></body></html>

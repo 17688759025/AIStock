@@ -159,6 +159,45 @@ def domestic_price(code, now):
     return result
 
 
+def related_stocks(board, now):
+    """Return a small, explainable current leader list for a mapped sector.
+
+    This is a board-member snapshot, not a historical backtest: price change,
+    turnover and amount are the fields available from the same board endpoint.
+    Keep the list short so the monthly page does not imply that every member
+    was independently researched.
+    """
+    params = {'pn': 1, 'pz': 100, 'po': 1, 'np': 1, 'fltt': 2, 'invt': 2,
+              'fid': 'f3', 'fs': 'b:'+board['code'],
+              'fields': 'f2,f3,f6,f8,f10,f12,f14,f17,f18,f62,f100'}
+    j = request('https://push2.eastmoney.com/api/qt/clist/get?'+urllib.parse.urlencode(params))
+    raw = (j.get('data') or {}).get('diff') or []
+    if isinstance(raw, dict):
+        raw = list(raw.values())
+    rows = []
+    for x in raw:
+        code, name = str(x.get('f12') or ''), str(x.get('f14') or '')
+        change, amount, turnover = number(x.get('f3')), number(x.get('f6')), number(x.get('f10'))
+        flow = number(x.get('f62'))
+        if not re.fullmatch(r'\d{6}', code) or not name or re.search(r'^(ST|\*ST|退)', name, re.I):
+            continue
+        if change is None or amount is None or amount <= 0:
+            continue
+        rows.append({'code': code, 'name': name, 'change': round(change, 2),
+                     'amount': round(amount, 2), 'turnover': round(turnover or 0, 2),
+                     'mainFlow': round(flow or 0, 2), 'sector': x.get('f100') or board['name']})
+    if not rows:
+        raise RuntimeError('板块成分行情为空')
+    def pct(values, value):
+        ordered = sorted(values)
+        return (sum(v <= value for v in ordered)-1)/max(1, len(ordered)-1)*100
+    changes, amounts, flows = [r['change'] for r in rows], [math.log10(max(1, r['amount'])) for r in rows], [r['mainFlow'] for r in rows]
+    for row in rows:
+        row['relatedScore'] = round(clamp(.45*pct(changes,row['change']) + .25*pct(amounts,math.log10(max(1,row['amount']))) + .30*pct(flows,row['mainFlow'])), 1)
+    rows.sort(key=lambda r: (-r['relatedScore'], -r['change'], r['code']))
+    return {'asOf': now.isoformat(), 'source': '东方财富板块成分行情', 'board': board['name'], 'count': len(rows), 'stocks': rows[:3]}
+
+
 def resolve_board(theme):
     for name in theme['boards']:
         j = request('https://searchapi.eastmoney.com/api/suggest/get?'+urllib.parse.urlencode({'input': name, 'type': 14, 'count': 10}))
@@ -418,6 +457,7 @@ def collect(root, now):
                 jobs[pool.submit(domestic_price,board['code'],now)] = ('domestic',ident)
                 if dates:
                     jobs[pool.submit(historical_flow,board['code'],dates)] = ('flowHistory',ident)
+                jobs[pool.submit(related_stocks,board,now)] = ('relatedStocks',ident)
         for job in concurrent.futures.as_completed(jobs):
             kind,label = jobs[job]
             try:
@@ -453,6 +493,7 @@ def collect(root, now):
     ranked = sorted([score_theme(t,merged,days,now) for t in THEMES],key=lambda t:(-t['score'],t['id']))
     for row in ranked:
         row['representativeBoard'] = boards.get(row['id'])
+        row['relatedStocks'] = observations.get(row['id'], {}).get('relatedStocks', {})
     current['leader'] = next((r['id'] for r in ranked if r['eligible']),None)
     days = daily_observations(history,current)
     state = choose_month(ranked,previous.get('monthState',{}),days,now)

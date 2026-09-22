@@ -133,26 +133,55 @@ async function buildCloseResult(runtime, inputs, meta) {
 }
 
 async function main() {
-  const debug=process.argv.includes('--debug'),date=day();
+  const debug=process.argv.includes('--debug'),captureOnly=process.argv.includes('--capture-only'),scoreOnly=process.argv.includes('--score-only'),date=day();
+  if(captureOnly&&scoreOnly||debug&&(captureOnly||scoreOnly))throw Error('Conflicting close collector modes');
   const output=debug?'/tmp/close-result-debug.json':path.join(ROOT,'data','close',`${date}.result.json`);
+  const captureFile=path.join(ROOT,'data','close',`${date}.capture.json`);
   if(!debug&&fs.existsSync(output)){updateCloseIndex();console.log('Already frozen:',output);return;}
-  if(!debug){
+  let inputs, captureStartedAt, captureCompletedAt;
+  if(!debug&&fs.existsSync(captureFile)){
+    const saved=JSON.parse(fs.readFileSync(captureFile,'utf8'));
+    if(saved.kind!=='close-capture'||saved.tradeDate!==date||!saved.inputs)throw Error('Saved close capture is invalid');
+    inputs=saved.inputs;captureStartedAt=saved.captureStartedAt;captureCompletedAt=saved.captureCompletedAt;
+    console.log('Resume from saved close capture:',captureFile);
+  } else if(scoreOnly) {
+    throw Error('No saved close capture; scoring cannot fetch replacement 14:30 quotes');
+  } else {
+   if(!debug){
     const weekday=new Date(instant(date,'12:00:00')).getUTCDay();if(weekday===0||weekday===6){console.log('Weekend: no result');return;}
     if(Date.now()>=instant(date,'14:31:00'))throw Error('14:30 snapshot missed; no later reconstruction');
     while(Date.now()<instant(date,'14:30:03'))await sleep(Math.min(30000,instant(date,'14:30:03')-Date.now()));
+   }
+   const captureRequest=makeRequest(debug?Date.now()+60000:instant(date,'14:31:00'));
+   const runtime=createRuntime({collectorDate:date});runtime.run('tradeDateKey=()=>collectorDate');
+   captureStartedAt=new Date().toISOString();let error;
+   // Retry the complete input batch while the one-minute capture window is open.
+   for(let attempt=1;attempt<=3&&!inputs;attempt++){
+    try{inputs=await collectCloseInputs(runtime,captureRequest,date,debug)}catch(e){error=e;if(!debug&&Date.now()+250>=instant(date,'14:31:00'))break;if(attempt<3)await sleep(250)}
+   }
+   if(!inputs)throw error||new Error('14:30 close inputs unavailable');
+   captureCompletedAt=new Date().toISOString();
+   if(!debug){assertCloseCaptureTime(new Date(captureStartedAt),date);assertCloseCaptureTime(new Date(captureCompletedAt),date);}
+   if(captureOnly){
+    const capture={schemaVersion:1,kind:'close-capture',tradeDate:date,debug:false,captureStartedAt,captureCompletedAt,inputs};
+    capture.checksum=crypto.createHash('sha256').update(JSON.stringify(capture)).digest('hex');
+    writeOnce(captureFile,capture);console.log(JSON.stringify({captureFile,coverage:inputs.coverage}));return;
+   }
   }
-  const captureRequest=makeRequest(debug?Date.now()+60000:instant(date,'14:31:00'));
+  if(!debug&&!fs.existsSync(captureFile)){
+    const capture={schemaVersion:1,kind:'close-capture',tradeDate:date,debug:false,captureStartedAt,captureCompletedAt,inputs};
+    capture.checksum=crypto.createHash('sha256').update(JSON.stringify(capture)).digest('hex');writeOnce(captureFile,capture);
+  }
+  if(captureOnly)return;
+  const historyRequest=makeRequest(debug?Date.now()+240000:Date.now()+240000);
   const runtime=createRuntime({collectorDate:date});runtime.run('tradeDateKey=()=>collectorDate');
-  const captureStartedAt=new Date().toISOString(),inputs=await collectCloseInputs(runtime,captureRequest,date,debug),captureCompletedAt=new Date().toISOString();
-  if(!debug){assertCloseCaptureTime(new Date(captureStartedAt),date);assertCloseCaptureTime(new Date(captureCompletedAt),date);}
-  const historyRequest=makeRequest(debug?Date.now()+240000:instant(date,'14:34:40'));
   runtime.context.closeRequest=historyRequest;
   runtime.context.fetch=async url=>({ok:true,json:async()=>historyRequest(url,5000)});
   runtime.run('requestNode=(url,timeout)=>closeRequest(url,timeout)');
   const result=await buildCloseResult(runtime,inputs,{tradeDate:date,captureStartedAt,captureCompletedAt});
   result.generatedAt=new Date().toISOString();result.debug=debug;result.snapshotId=crypto.createHash('sha256').update(JSON.stringify(result)).digest('hex');
   if(!debug){
-    if(Date.now()>=instant(date,'14:35:00'))throw Error('Missed result generation deadline');
+    if(!scoreOnly&&!debug&&Date.now()>=instant(date,'14:35:00'))throw Error('Missed result generation deadline');
     runtime.context.builtClose=result;runtime.run('validateFrozenClose(builtClose)');writeOnce(output,result);updateCloseIndex();
   }else fs.writeFileSync(output,JSON.stringify(result));
   console.log(JSON.stringify({output,snapshotId:result.snapshotId,coverage:inputs.coverage,counts:Object.fromEntries(Object.entries(result.universes).map(([k,v])=>[k,{candidates:v.scannedCount,minuteReady:v.minuteReady,picks:v.picks.length}]))}));

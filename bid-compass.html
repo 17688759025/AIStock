@@ -111,6 +111,13 @@ function validateFrozenAuction(p,date=tradeDateKey()){
 async function loadFrozenAuction(){
  if(frozenAuction?.tradeDate===tradeDateKey())return validateFrozenAuction(frozenAuction);
  try{const cached=JSON.parse(localStorage.getItem(frozenCacheKey())||'null');if(cached)return validateFrozenAuction(cached)}catch(e){}
+ // If this browser already rebuilt today's list after the official snapshot
+ // was missing, keep that first successful list authoritative for the rest of
+ // the day. A late GitHub result must not silently replace it on refresh.
+ try{
+  const recovered=JSON.parse(localStorage.getItem(recoveredAuctionCacheKey(tradeDateKey(),mainOnly?'main':'all'))||'null');
+  if(recovered){validateRecoveredAuction(recovered);throw Object.assign(Error('本机竞价重建快照已冻结'),{recovered:true})}
+ }catch(e){if(e?.recovered)throw e}
  const date=tradeDateKey(),file='data/auction/'+date+'.result.json',stamp=Date.now(),urls=['https://raw.githubusercontent.com/17688759025/AIStock/main/'+file+'?t='+stamp,file+'?t='+stamp];
  try{const payload=await Promise.any(urls.map(async url=>{const c=new AbortController(),timer=setTimeout(()=>c.abort(),9000);try{const r=await fetch(url,{cache:'no-store',signal:c.signal});if(!r.ok)throw Error('HTTP '+r.status);return validateFrozenAuction(await r.json(),date)}finally{clearTimeout(timer)}}));try{localStorage.setItem(frozenCacheKey(),JSON.stringify(payload))}catch(e){}return payload}
  catch(e){throw Error(hhmm()<930?'今日09:25统一结果尚未发布，请稍后刷新':'今日缺少09:25正式快照，无法展示当日竞价名单')}
@@ -146,9 +153,22 @@ async function buildRecoveredAuction(date=tradeDateKey(),scope=mainOnly?'main':'
  const priced=raw.filter(s=>s.openPrice>0&&s.previousClose>0),market=stableStocks(scope==='main'?priced.filter(isMainBoard):priced);if(!market.length||!market.some(s=>s.volume>0))throw Error('今日开盘价或成交量尚未返回，刷新将重新实时拉取');allStocks=market;totalCount=market.length;auctionBreadth=market.filter(s=>s.auction>0).length/Math.max(1,market.length)*100;
  const base=market.filter(s=>s.auction>=.6&&s.auction<=8.5&&s.volume>0&&!isNearLimit(s));await enrichAuctionSectors(base);
  stocks=[...base].sort((a,b)=>auctionBell(b.auction,2.757,2.2)-auctionBell(a.auction,2.757,2.2)||(String(a.code)<String(b.code)?-1:1)).slice(0,40);await enrichAuctionHistory(stocks);enrichMarket(base);prepareAuctionScores(stocks);
- const candidates=structuredClone(stocks),picks=rank(stocks).map(s=>({...s,recoveredAuction:true,frozenAuction:false,auctionVolumeApproximate:true}));await preparePremarketObservation(market);premarketState='本机重建 · '+premarketState;
- const payload={schemaVersion:1,modelVersion:AUCTION_MODEL_VERSION,tradeDate:date,scope,status:'recovered',auctionBasis:'today-open',recoveredAt:new Date().toISOString(),source:dataProvider,scannedCount:market.length,candidateCount:base.length,historyReady:candidates.filter(s=>s.historyReady).length,fundReady:candidates.filter(s=>s.fundFlowReady).length,candidates,picks,premarketPick:structuredClone(premarketPick),premarketState};
- validateRecoveredAuction(payload,date,scope);try{localStorage.setItem(recoveredAuctionCacheKey(date,scope),JSON.stringify(payload))}catch(e){}return payload;
+ const candidates=structuredClone(stocks),picks=rank(stocks).map(s=>({...s,recoveredAuction:true,frozenAuction:false,auctionVolumeApproximate:true}));
+ // Freeze the ranked auction list before optional premarket enrichment. If a
+ // later request fails, refreshes must reuse this exact list instead of
+ // rebuilding and potentially producing a different ranking.
+ const payload={schemaVersion:1,modelVersion:AUCTION_MODEL_VERSION,tradeDate:date,scope,status:'recovered',auctionBasis:'today-open',recoveredAt:new Date().toISOString(),source:dataProvider,scannedCount:market.length,candidateCount:base.length,historyReady:candidates.filter(s=>s.historyReady).length,fundReady:candidates.filter(s=>s.fundFlowReady).length,candidates,picks,premarketPick:null,premarketState:'本机重建 · 竞价名单已冻结，盘前事件补充中'};
+ validateRecoveredAuction(payload,date,scope);persistRecoveredAuction(payload,date,scope);
+ await preparePremarketObservation(market);premarketState='本机重建 · '+premarketState;
+ payload.premarketPick=structuredClone(premarketPick);payload.premarketState=premarketState;persistRecoveredAuction(payload,date,scope);return payload;
+}
+function persistRecoveredAuction(payload,date=tradeDateKey(),scope=mainOnly?'main':'all'){
+ validateRecoveredAuction(payload,date,scope);
+ const key=recoveredAuctionCacheKey(date,scope),encoded=JSON.stringify(payload);
+ try{
+  localStorage.setItem(key,encoded);
+  if(localStorage.getItem(key)!==encoded)throw Error('本机缓存回读不一致');
+ }catch(e){console.warn('竞价重建缓存写入失败',e);}
 }
 async function loadRecoveredAuction(){
  const date=tradeDateKey(),scope=mainOnly?'main':'all';

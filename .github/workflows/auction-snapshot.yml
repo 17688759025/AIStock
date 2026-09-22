@@ -2,11 +2,10 @@ name: Auction snapshot collector
 
 on:
   schedule:
-    # GitHub cron can arrive hours late. The 20:45 UTC run corresponds to
-    # 04:45 Asia/Shanghai on the following Mon-Fri and waits for 09:25:03.
-    - cron: '45 20 * * 0-4'
-    - cron: '45 0 * * 1-5'
-    - cron: '5,15 1 * * 1-5'
+    # Keep attempts close to the 09:25 freeze window. Earlier long-running
+    # jobs used to occupy one global concurrency slot and make the 09:25 run
+    # start after the auction had already closed.
+    - cron: '5,15,25 1 * * 1-5' # 09:05, 09:15, 09:25 Asia/Shanghai
   workflow_dispatch:
     inputs:
       debug:
@@ -19,7 +18,10 @@ permissions:
   contents: write
 
 concurrency:
-  group: auction-snapshot
+  # Each attempt must be able to reach the provider during the freeze window.
+  # The dated capture/result files are write-once, so parallel attempts are
+  # safe and the first verified capture wins.
+  group: auction-snapshot-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:

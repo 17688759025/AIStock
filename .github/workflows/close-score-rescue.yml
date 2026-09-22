@@ -1,0 +1,53 @@
+name: Close score rescue
+
+on:
+  schedule:
+    - cron: '35,45 6 * * 1-5' # 14:35 and 14:45 Asia/Shanghai
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: close-score-rescue-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Score saved 14:30 capture
+        run: |
+          set -euo pipefail
+          DATE="$(date +%F)"
+          CAPTURE="data/close/${DATE}.capture.json"
+          RESULT="data/close/${DATE}.result.json"
+          if [ -f "$CAPTURE" ] && [ ! -f "$RESULT" ]; then
+            node scripts/collect_close_result.cjs --score-only
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git add -- "$CAPTURE" "$RESULT" data/close/index.json
+            git commit -m "Publish 14:30 close result $(date +%F)"
+            for attempt in 1 2 3; do
+              if ! git pull --rebase origin main; then
+                git rebase --abort >/dev/null 2>&1 || true
+                git fetch origin main
+                if git cat-file -e "origin/main:$RESULT" 2>/dev/null; then exit 0; fi
+                exit 1
+              fi
+              if git push origin main; then exit 0; fi
+              sleep "$((attempt * 2))"
+            done
+            exit 1
+          fi
+          echo "No saved close capture requiring rescue"

@@ -1,0 +1,40 @@
+name: Auction score rescue
+
+on:
+  schedule:
+    - cron: '35,45 1 * * 1-5' # 09:35 and 09:45 Asia/Shanghai
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auction-score-rescue-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Score a saved capture when the first run missed publication
+        run: |
+          set -euo pipefail
+          DATE="$(date +%F)"
+          CAPTURE="data/auction/${DATE}.capture.json"
+          RESULT="data/auction/${DATE}.result.json"
+          if [ -f "$CAPTURE" ] && [ ! -f "$RESULT" ]; then
+            node scripts/collect_auction_result.cjs --score-only
+            bash scripts/publish-auction-data.sh result
+          else
+            echo "No rescue needed: capture=${CAPTURE}, result=${RESULT}"
+          fi

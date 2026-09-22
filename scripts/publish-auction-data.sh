@@ -15,7 +15,19 @@ if git diff --cached --quiet; then exit 0; fi
 git commit -m "Save auction $kind $trade_date"
 for attempt in 1 2 3; do
   # Never force push or overwrite an immutable file in a rebase conflict.
-  git pull --rebase origin main
+  if ! git pull --rebase origin main; then
+    # Parallel 09:25 attempts can legitimately race to publish the same
+    # write-once dated file. If another attempt already won, this attempt is
+    # successful enough to continue with scoring instead of failing the run.
+    git rebase --abort >/dev/null 2>&1 || true
+    git fetch origin main
+    if git cat-file -e "origin/main:$target" 2>/dev/null; then
+      git reset --mixed origin/main >/dev/null
+      echo "$target already published by another attempt"
+      exit 0
+    fi
+    exit 1
+  fi
   if git push origin main; then exit 0; fi
   sleep "$((attempt * 2))"
 done

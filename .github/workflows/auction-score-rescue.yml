@@ -2,7 +2,11 @@ name: Auction score rescue
 
 on:
   schedule:
-    - cron: '35,45 1 * * 1-5' # 09:35 and 09:45 Asia/Shanghai
+    - cron: '32,42,52 1 * * 1-5' # 09:32, 09:42, 09:52 Shanghai
+    - cron: '12 2 * * 1-5' # 10:12 final publication check
+  workflow_run:
+    workflows: ['Auction snapshot collector']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +18,7 @@ concurrency:
 
 jobs:
   rescue:
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'schedule') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -35,6 +40,9 @@ jobs:
           if [ -f "$CAPTURE" ] && [ ! -f "$RESULT" ]; then
             node scripts/collect_auction_result.cjs --score-only
             bash scripts/publish-auction-data.sh result
+          elif [ -f "$RESULT" ]; then
+            echo "Verified result file present: $RESULT"
           else
-            echo "No rescue needed: capture=${CAPTURE}, result=${RESULT}"
+            echo "::error::No saved 09:25 capture or result for $DATE; cannot substitute intraday quotes (also check exchange holidays)."
+            exit 1
           fi

@@ -23,6 +23,9 @@ for attempt in 1 2 3; do
     git fetch origin main
     if git cat-file -e "origin/main:$target" 2>/dev/null; then
       git reset --mixed origin/main >/dev/null
+      # Reset --mixed leaves the losing runner's capture in the worktree.
+      # Score the remote winner, not a different unpublished input batch.
+      git restore --source=origin/main --worktree -- "$target"
       echo "$target already published by another attempt"
       exit 0
     fi

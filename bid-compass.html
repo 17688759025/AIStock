@@ -110,6 +110,10 @@ function validateFrozenAuction(p,date=tradeDateKey()){
 }
 async function loadFrozenAuction(){
  if(frozenAuction?.tradeDate===tradeDateKey())return validateFrozenAuction(frozenAuction);
+ const recoveryKey=recoveredAuctionCacheKey();
+ if(recoveredAuctionMemory.has(recoveryKey))throw Error('本页首次竞价名单已锁定');
+ let sessionRecovery=null;try{sessionRecovery=JSON.parse(sessionStorage.getItem(recoveryKey)||'null');if(sessionRecovery)validateRecoveredAuction(sessionRecovery)}catch(e){sessionRecovery=null}
+ if(sessionRecovery)throw Error('本标签页首次竞价名单已锁定');
  try{const cached=JSON.parse(localStorage.getItem(frozenCacheKey())||'null');if(cached)return validateFrozenAuction(cached)}catch(e){}
  // If this browser already rebuilt today's list after the official snapshot
  // was missing, keep that first successful list authoritative for the rest of
@@ -131,12 +135,15 @@ function applyFrozenAuction(payload){
  renderPremarket();return view;
 }
 function recoveredAuctionCacheKey(date=tradeDateKey(),scope=mainOnly?'main':'all'){return 'ai_stock_recovered_0925_'+AUCTION_MODEL_VERSION+'_v1_'+date+'_'+scope}
+const recoveredAuctionMemory=new Map();
+let recoveredAuctionDate=null;
 function validateRecoveredAuction(p,date=tradeDateKey(),scope=mainOnly?'main':'all'){
  const recoveredAt=Date.parse(p?.recoveredAt),earliest=Date.parse(date+'T09:25:00+08:00'),latest=Date.parse(date+'T23:59:59+08:00');
  if(!p||p.schemaVersion!==1||p.modelVersion!==AUCTION_MODEL_VERSION||p.tradeDate!==date||p.scope!==scope||p.status!=='recovered'||p.auctionBasis!=='today-open'||!Number.isFinite(recoveredAt)||recoveredAt<earliest||recoveredAt>latest||!Number.isFinite(p.scannedCount)||!Number.isFinite(p.candidateCount)||!Array.isArray(p.picks)||p.picks.length>FINAL_LIMIT||new Set(p.picks.map(s=>s.code)).size!==p.picks.length||p.picks.some(s=>!/^[0-9]{6}$/.test(s.code)||!Number.isFinite(s.auction)||!Number.isFinite(s.score)||!s.recoveredAuction))throw Error('本机竞价重建缓存不完整');
  return p;
 }
 function applyRecoveredAuction(payload){
+ recoveredAuctionDate=payload.tradeDate;
  validateRecoveredAuction(payload);stocks=structuredClone(payload.picks);totalCount=payload.scannedCount;premarketPick=structuredClone(payload.premarketPick||null);premarketState=payload.premarketState||'本机竞价重建未产生单只观察';
  stocks.forEach(s=>{const live=liveAuctionChanges.get(s.code);if(live){s.currentChange=live.change;s.auctionReturn=live.change-s.auction}});renderPremarket();return payload;
 }
@@ -165,13 +172,18 @@ async function buildRecoveredAuction(date=tradeDateKey(),scope=mainOnly?'main':'
 function persistRecoveredAuction(payload,date=tradeDateKey(),scope=mainOnly?'main':'all'){
  validateRecoveredAuction(payload,date,scope);
  const key=recoveredAuctionCacheKey(date,scope),encoded=JSON.stringify(payload);
+ recoveredAuctionMemory.set(key,structuredClone(payload));
+ try{sessionStorage.setItem(key,encoded)}catch(e){}
  try{
   localStorage.setItem(key,encoded);
   if(localStorage.getItem(key)!==encoded)throw Error('本机缓存回读不一致');
- }catch(e){console.warn('竞价重建缓存写入失败',e);}
+ }catch(e){console.warn('竞价重建缓存写入失败',e);$('dataNote').textContent='本机持久缓存写入失败；当前页面名单仍锁定，请勿关闭页面';}
 }
 async function loadRecoveredAuction(){
  const date=tradeDateKey(),scope=mainOnly?'main':'all';
+ const key=recoveredAuctionCacheKey(date,scope);
+ if(recoveredAuctionMemory.has(key))return validateRecoveredAuction(structuredClone(recoveredAuctionMemory.get(key)),date,scope);
+ try{const cached=JSON.parse(sessionStorage.getItem(key)||'null');if(cached)return validateRecoveredAuction(cached,date,scope)}catch(e){}
  try{const cached=JSON.parse(localStorage.getItem(recoveredAuctionCacheKey(date,scope))||'null');if(cached)return validateRecoveredAuction(cached,date,scope)}catch(e){}
  return buildRecoveredAuction(date,scope);
 }
@@ -344,6 +356,7 @@ function allowed(){if(mode==='rightside')return true;const t=hhmm();if(mode==='a
 function clock(){const ok=allowed();$('marketStatus').className=ok?'status':'status wait';if(mode==='rightside'){$('marketStatus').textContent='已收盘日线 · 可查询';return}if(mode==='auction')$('marketStatus').textContent=ok?'读取当日 09:25 冻结结果':'等待 09:25 竞价结束';else if(mode==='intraday'){const w=tradingWindow();$('marketStatus').textContent=w?(w.paused?'休市 · 截至 '+minuteLabel(w.asOf):'前 '+w.duration+' 个交易分钟')+' · 可查询':'等待当日开盘后的交易数据'}else $('marketStatus').textContent=ok?'读取当日 14:30 冻结结果':'等待 14:30'}
 async function refresh(){
  const generation=++refreshGeneration,requestedMode=mode,requestedMain=mainOnly,date=tradeDateKey(),current=()=>generation===refreshGeneration&&mode===requestedMode&&mainOnly===requestedMain&&tradeDateKey()===date;
+ if(recoveredAuctionDate&&recoveredAuctionDate!==date){recoveredAuctionDate=null;recoveredAuctionMemory.clear();liveAuctionChanges=new Map();if(requestedMode==='auction'){stocks=[];premarketPick=null}}
  if(requestedMode==='rightside'){await refreshRightSide(current,requestedMain);return}
  if(frozenAuction&&frozenAuction.tradeDate!==date){frozenAuction=null;liveAuctionChanges=new Map();stocks=[];premarketPick=null;premarketState='等待今日09:25结果';renderPremarket()}
  if(frozenClose&&frozenClose.tradeDate!==date){frozenClose=null;liveCloseChanges=new Map();if(requestedMode==='close')stocks=[]}

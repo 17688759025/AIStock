@@ -116,8 +116,17 @@ test('missing snapshot rebuilds once from today open; official cache wins and re
   // recovery snapshot and silently change the ranking on refresh.
   r.context.fixture=frozenFixture(r);r.context.fetch=async()=>({ok:true,json:async()=>structuredClone(r.context.fixture)});
   r.run('loadEastmoneyMarket=async()=>{throw Error("MUST NOT REBUILD")};stocks=[]');await r.run('refresh()');assert.deepEqual(plain(r.run('stocks')),first);assert.equal(r.run('recoveryLoads'),1);
-  r.context.fixture=frozenFixture(r);r.run('localStorage.setItem(frozenCacheKey(),JSON.stringify(fixture));stocks=[]');await r.run('refresh()');assert.equal(r.run('stocks.length'),2);assert.ok(r.run('stocks.every(s=>s.frozenAuction)'));assert.doesNotMatch(r.elements.get('sourceMode').textContent,/本机重建/);
+  r.context.fixture=frozenFixture(r);r.run('localStorage.setItem(frozenCacheKey(),JSON.stringify(fixture));stocks=[]');await r.run('refresh()');assert.deepEqual(plain(r.run('stocks')),first);
   r.run('loadSinaMarket=async()=>{throw Error("MUST NOT USE EXPIRED RECOVERY")}');r.setTime('2026-09-08T10:00:00+08:00');await r.run('refresh()');assert.equal(r.run('stocks.length'),0);assert.equal(r.run('premarketPick'),null);
+});
+
+test('recovery survives localStorage quota errors in the same page', async () => {
+  const r=runtimeAt('10:00:00');
+  r.run(`localStorage.setItem=()=>{throw Error('QuotaExceededError')};
+    persistRecoveredAuction({schemaVersion:1,modelVersion:AUCTION_MODEL_VERSION,tradeDate:tradeDateKey(),scope:'main',status:'recovered',auctionBasis:'today-open',recoveredAt:new Date().toISOString(),scannedCount:3000,candidateCount:40,picks:[]});
+    buildRecoveredAuction=async()=>{throw Error('MUST NOT REBUILD')}`);
+  assert.equal((await r.run('loadRecoveredAuction()')).scannedCount,3000);
+  await assert.rejects(()=>r.run('loadFrozenAuction()'),/锁定/);
 });
 
 test('auction recovery starts at 09:25 but rejects pre-auction and unverified dates', async () => {

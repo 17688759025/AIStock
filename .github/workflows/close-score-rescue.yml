@@ -2,7 +2,11 @@ name: Close score rescue
 
 on:
   schedule:
-    - cron: '35,45 6 * * 1-5' # 14:35 and 14:45 Asia/Shanghai
+    - cron: '35,45,55 6 * * 1-5' # 14:35, 14:45, 14:55 Shanghai
+    - cron: '15 7 * * 1-5' # 15:15 final publication check
+  workflow_run:
+    workflows: ['Close snapshot collector']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +18,7 @@ concurrency:
 
 jobs:
   score:
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'schedule') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -50,4 +55,9 @@ jobs:
             done
             exit 1
           fi
-          echo "No saved close capture requiring rescue"
+          if [ -f "$RESULT" ]; then
+            echo "Result already published: $RESULT"
+          else
+            echo "::error::No saved 14:30 capture or result for $DATE; cannot substitute later quotes (also check exchange holidays)."
+            exit 1
+          fi

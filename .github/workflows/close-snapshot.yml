@@ -2,9 +2,10 @@ name: Close snapshot collector
 
 on:
   schedule:
-    # Do not depend on one long-lived runner from the morning. GitHub may
-    # delay or queue scheduled jobs; these three attempts are all close to the
-    # strict 14:30 capture minute and race for the first valid snapshot.
+    # Early independent runners wait until 14:30:03. Later attempts provide
+    # redundancy, but schedule delivery is not guaranteed by GitHub.
+    - cron: '27,57 4 * * 1-5' # 12:27, 12:57 Shanghai
+    - cron: '27,57 5 * * 1-5' # 13:27, 13:57 Shanghai
     - cron: '20,25,30 6 * * 1-5' # 14:20, 14:25, 14:30 Asia/Shanghai
   workflow_dispatch:
     inputs:
@@ -26,7 +27,8 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Covers the earliest 12:27 start plus capture, scoring and publication.
+    timeout-minutes: 180
     env:
       TZ: Asia/Shanghai
     steps:
@@ -62,6 +64,7 @@ jobs:
               git fetch origin main
               if git cat-file -e "origin/main:$target" 2>/dev/null; then
                 git reset --mixed origin/main >/dev/null
+                git restore --source=origin/main --worktree -- "$target"
                 echo "$target already published by another attempt"
                 exit 0
               fi
@@ -94,6 +97,16 @@ jobs:
             sleep "$((attempt * 2))"
           done
           exit 1
+      - name: Preserve raw capture and result even if publication fails
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: close-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            data/close/*.capture.json
+            data/close/*.result.json
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: ${{ inputs.debug == true }}
         with:

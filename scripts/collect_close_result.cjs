@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Capture selection inputs during the 14:30 minute, then freeze one daily
-// result. Later minute-series reads are always cut at 14:30, never at now.
+// Capture selection inputs around 14:30, then freeze one daily result. If an
+// Actions runner starts late, it may still recover the same day's inputs; all
+// minute-series reads remain cut at the fixed 14:00–14:30 window.
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -29,8 +30,8 @@ function updateCloseIndex(root = ROOT) {
 }
 
 function assertCloseCaptureTime(now, date) {
-  if (!Number.isFinite(+now) || +now < instant(date, '14:30:00') || +now >= instant(date, '14:31:00')) {
-    throw new Error('Missed the 14:30 capture minute; later quotes cannot replace the frozen result');
+  if (!Number.isFinite(+now) || +now < instant(date, '14:30:00') || +now >= instant(date, '24:00:00')) {
+    throw new Error('尾盘采集必须在当日 14:30 至午夜前完成');
   }
 }
 
@@ -65,13 +66,15 @@ async function collectEvents(request, { debug = false } = {}) {
   throw new Error('Stock-change limit reached before covering 14:00–14:30');
 }
 
-function freshQuote(row, date, debug = false) {
+function freshQuote(row, date, debug = false, allowLate = false) {
   const stamp = Number(row.f124) * 1000;
-  const validTime = debug ? Number.isFinite(stamp) && day(new Date(stamp)) === date : stamp >= instant(date, '14:30:00') && stamp < instant(date, '14:31:00');
+  const validTime = debug ? Number.isFinite(stamp) && day(new Date(stamp)) === date
+    : allowLate ? stamp >= instant(date, '14:30:00') && stamp < instant(date, '24:00:00')
+    : stamp >= instant(date, '14:30:00') && stamp < instant(date, '14:31:00');
   return validTime && typeof row.f3 === 'number' && Number(row.f2) > 0 && Number(row.f18) > 0;
 }
 
-async function collectCloseInputs(runtime, request, date, debug = false) {
+async function collectCloseInputs(runtime, request, date, debug = false, allowLate = false) {
   const specs = [['f62',1,'主力流入Top200'],['f62',2,'主力流入Top200'],['f22',1,'涨速Top100']];
   const jobs = specs.map(async ([fid,pn,label]) => {
     const rows = await eastmoney(request, 'clist/get', { pz:'100',pn:String(pn),po:'1',np:'1',fltt:'2',invt:'2',fid,fs:FILTER,fields:FIELDS });
@@ -93,7 +96,7 @@ async function collectCloseInputs(runtime, request, date, debug = false) {
   const quoteRows = (await mapLimit(batches, 4, list => eastmoney(request, 'ulist.np/get', {
     fltt:'2',fields:FIELDS,secids:list.map(s=>(s.code.startsWith('6')?'1.':'0.')+s.code).join(','),
   }))).flat();
-  const fresh = quoteRows.filter(q => freshQuote(q, date, debug));
+  const fresh = quoteRows.filter(q => freshQuote(q, date, debug, allowLate));
   if (new Set(fresh.map(q=>String(q.f12))).size < seeds.length*.9) throw new Error('14:30 candidate quotes are incomplete or stale');
   runtime.context.closeQuoteRows = fresh;runtime.context.closeSeeds = seeds;
   const rows = runtime.run(`(()=>{const quotes=new Map(normalize(closeQuoteRows).map(s=>[s.code,s])),raw=new Map(closeQuoteRows.map(s=>[String(s.f12),s]));return closeSeeds.filter(s=>quotes.has(s.code)).map(s=>({...s,...quotes.get(s.code),
@@ -103,7 +106,7 @@ async function collectCloseInputs(runtime, request, date, debug = false) {
    flowDataReady:Number.isFinite(raw.get(s.code).f62)&&Number.isFinite(raw.get(s.code).f184),
    signals:[...s.signals,...(${!eventResult}?['14:30异动接口缺失']:[])]
   }))})()`);
-  return { rows, source: 'Eastmoney · 14:30资金与异动', events, coverage: {
+  return { rows, source: `Eastmoney · ${allowLate ? '尾盘延迟补采' : '14:30资金与异动'}`, events, coverage: {
     rankingPages:rankingResults.length, expectedRankingPages:3, eventComplete:!!eventResult?.complete,
     eventPages:eventResult?.pages||0, capturedEvents:events.length, capturedQuotes:rows.length,
   }};
@@ -117,7 +120,13 @@ async function buildCloseResult(runtime, inputs, meta) {
    const shortlist=list=>[...list].sort((a,b)=>closePreScore(b)-closePreScore(a)||a.code.localeCompare(b.code)).slice(0,120);
    const union=stableStocks([...shortlist(base),...shortlist(base.filter(isMainBoard))]);
    const done=await closeMapLimit(union,8,async s=>{try{return await loadWindow(structuredClone(s),'close')}catch(e){return null}});
-   const ready=done.filter(Boolean),byCode=new Map(ready.map(s=>[s.code,s]));
+   // The fixed close window is the source of truth for delayed runs too.
+   // Never expose a late current quote as the historical 14:30 price/change.
+   const ready=done.filter(Boolean).map(s=>{
+    const previous=Number(s.previousClose),change=Number(s.windowEndChange);
+    if(Number.isFinite(previous)&&previous>0&&Number.isFinite(change))return {...s,snapshotPrice:previous*(1+change/100),snapshotChange:change,quoteTime:Date.parse(closeMeta.tradeDate+'T14:30:00+08:00'),snapshotBasis:'14:00–14:30分钟线'};
+    return s;
+   }),byCode=new Map(ready.map(s=>[s.code,s]));
    if(union.length&&!ready.length)throw Error('14:00–14:30 minute data unavailable; cannot freeze an empty result as a successful scan');
    const universes={};
    for(const scope of ['main','all']){
@@ -128,7 +137,7 @@ async function buildCloseResult(runtime, inputs, meta) {
     prepareCloseScores(candidates);const picks=rank(candidates).map(s=>({...s,frozenClose:true}));
     universes[scope]={scannedCount:market.length,shortlistedCount:selected.length,minuteReady:valid.length,candidateCount:candidates.length,candidates:structuredClone(candidates),picks};
    }
-   return{schemaVersion:1,modelVersion:CLOSE_MODEL_VERSION,tradeDate:closeMeta.tradeDate,selectionTime:'14:30',windowStart:'14:00',windowEnd:'14:30',status:'final',debug:false,timezone:'Asia/Shanghai',...closeMeta,source:closeInputs.source,sourceCoverage:closeInputs.coverage,events:closeInputs.events,universes};
+   return{schemaVersion:1,modelVersion:CLOSE_MODEL_VERSION,tradeDate:closeMeta.tradeDate,selectionTime:'14:30',windowStart:'14:00',windowEnd:'14:30',status:'final',debug:false,timezone:'Asia/Shanghai',...closeMeta,recoveredLate:closeMeta.captureMode==='late-recovery',snapshotBasis:'14:00–14:30分钟线',source:closeInputs.source,sourceCoverage:closeInputs.coverage,events:closeInputs.events,universes};
   })()`);
 }
 
@@ -138,38 +147,40 @@ async function main() {
   const output=debug?'/tmp/close-result-debug.json':path.join(ROOT,'data','close',`${date}.result.json`);
   const captureFile=path.join(ROOT,'data','close',`${date}.capture.json`);
   if(!debug&&fs.existsSync(output)){updateCloseIndex();console.log('Already frozen:',output);return;}
-  let inputs, captureStartedAt, captureCompletedAt;
+  let inputs, captureStartedAt, captureCompletedAt, captureMode;
   if(!debug&&fs.existsSync(captureFile)){
     const saved=JSON.parse(fs.readFileSync(captureFile,'utf8'));
     if(saved.kind!=='close-capture'||saved.tradeDate!==date||!saved.inputs)throw Error('Saved close capture is invalid');
-    inputs=saved.inputs;captureStartedAt=saved.captureStartedAt;captureCompletedAt=saved.captureCompletedAt;
+    inputs=saved.inputs;captureStartedAt=saved.captureStartedAt;captureCompletedAt=saved.captureCompletedAt;captureMode=saved.captureMode||'on-time';
     console.log('Resume from saved close capture:',captureFile);
   } else if(scoreOnly) {
     throw Error('No saved close capture; scoring cannot fetch replacement 14:30 quotes');
   } else {
    if(!debug){
     const weekday=new Date(instant(date,'12:00:00')).getUTCDay();if(weekday===0||weekday===6){console.log('Weekend: no result');return;}
-    if(Date.now()>=instant(date,'14:31:00'))throw Error('14:30 snapshot missed; no later reconstruction');
     while(Date.now()<instant(date,'14:30:03'))await sleep(Math.min(30000,instant(date,'14:30:03')-Date.now()));
    }
-   const captureRequest=makeRequest(debug?Date.now()+60000:instant(date,'14:31:00'));
+   const late=!debug&&Date.now()>=instant(date,'14:31:00');
+   captureMode=late?'late-recovery':'on-time';
+   const captureRequest=makeRequest(debug?Date.now()+60000:Date.now()+120000);
    const runtime=createRuntime({collectorDate:date});runtime.run('tradeDateKey=()=>collectorDate');
    captureStartedAt=new Date().toISOString();let error;
-   // Retry the complete input batch while the one-minute capture window is open.
+   // Retry the complete input batch; late runs are allowed to recover the same
+   // trading date and their minute-series scoring is still fixed at 14:00–14:30.
    for(let attempt=1;attempt<=3&&!inputs;attempt++){
-    try{inputs=await collectCloseInputs(runtime,captureRequest,date,debug)}catch(e){error=e;if(!debug&&Date.now()+250>=instant(date,'14:31:00'))break;if(attempt<3)await sleep(250)}
+    try{inputs=await collectCloseInputs(runtime,captureRequest,date,debug,late)}catch(e){error=e;if(attempt<3)await sleep(250)}
    }
    if(!inputs)throw error||new Error('14:30 close inputs unavailable');
    captureCompletedAt=new Date().toISOString();
-   if(!debug){assertCloseCaptureTime(new Date(captureStartedAt),date);assertCloseCaptureTime(new Date(captureCompletedAt),date);}
+   if(!debug&&late){assertCloseCaptureTime(new Date(captureStartedAt),date);assertCloseCaptureTime(new Date(captureCompletedAt),date);}
    if(captureOnly){
-    const capture={schemaVersion:1,kind:'close-capture',tradeDate:date,debug:false,captureStartedAt,captureCompletedAt,inputs};
+    const capture={schemaVersion:1,kind:'close-capture',tradeDate:date,debug:false,captureMode,captureStartedAt,captureCompletedAt,inputs};
     capture.checksum=crypto.createHash('sha256').update(JSON.stringify(capture)).digest('hex');
     writeOnce(captureFile,capture);console.log(JSON.stringify({captureFile,coverage:inputs.coverage}));return;
    }
   }
   if(!debug&&!fs.existsSync(captureFile)){
-    const capture={schemaVersion:1,kind:'close-capture',tradeDate:date,debug:false,captureStartedAt,captureCompletedAt,inputs};
+    const capture={schemaVersion:1,kind:'close-capture',tradeDate:date,debug:false,captureMode:captureMode||'on-time',captureStartedAt,captureCompletedAt,inputs};
     capture.checksum=crypto.createHash('sha256').update(JSON.stringify(capture)).digest('hex');writeOnce(captureFile,capture);
   }
   if(captureOnly)return;
@@ -178,10 +189,11 @@ async function main() {
   runtime.context.closeRequest=historyRequest;
   runtime.context.fetch=async url=>({ok:true,json:async()=>historyRequest(url,5000)});
   runtime.run('requestNode=(url,timeout)=>closeRequest(url,timeout)');
-  const result=await buildCloseResult(runtime,inputs,{tradeDate:date,captureStartedAt,captureCompletedAt});
+  const result=await buildCloseResult(runtime,inputs,{tradeDate:date,captureMode:captureMode||'on-time',captureStartedAt,captureCompletedAt});
   result.generatedAt=new Date().toISOString();result.debug=debug;result.snapshotId=crypto.createHash('sha256').update(JSON.stringify(result)).digest('hex');
   if(!debug){
-    if(!scoreOnly&&!debug&&Date.now()>=instant(date,'14:35:00'))throw Error('Missed result generation deadline');
+    // Result publication may happen any time before local midnight. The
+    // minute window is already fixed at 14:00–14:30, so no later quote is used.
     runtime.context.builtClose=result;runtime.run('validateFrozenClose(builtClose)');writeOnce(output,result);updateCloseIndex();
   }else fs.writeFileSync(output,JSON.stringify(result));
   console.log(JSON.stringify({output,snapshotId:result.snapshotId,coverage:inputs.coverage,counts:Object.fromEntries(Object.entries(result.universes).map(([k,v])=>[k,{candidates:v.scannedCount,minuteReady:v.minuteReady,picks:v.picks.length}]))}));

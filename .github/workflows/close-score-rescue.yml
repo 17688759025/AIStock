@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: '35,45,55 6 * * 1-5' # 14:35, 14:45, 14:55 Shanghai
     - cron: '15 7 * * 1-5' # 15:15 final publication check
+    - cron: '*/30 7-15 * * 1-5' # 15:00–23:30 Shanghai, late recovery window
+    - cron: '50 15 * * 1-5' # 23:50 Shanghai, last same-day attempt
   workflow_run:
     workflows: ['Close snapshot collector']
     types: [completed]
@@ -31,7 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Score saved 14:30 capture
+      - name: Recover and publish today's 14:30 window
         run: |
           set -euo pipefail
           DATE="$(date +%F)"
@@ -39,25 +41,28 @@ jobs:
           RESULT="data/close/${DATE}.result.json"
           if [ -f "$CAPTURE" ] && [ ! -f "$RESULT" ]; then
             node scripts/collect_close_result.cjs --score-only
-            git config user.name github-actions[bot]
-            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-            git add -- "$CAPTURE" "$RESULT" data/close/index.json
-            git commit -m "Publish 14:30 close result $(date +%F)"
-            for attempt in 1 2 3; do
-              if ! git pull --rebase origin main; then
-                git rebase --abort >/dev/null 2>&1 || true
-                git fetch origin main
-                if git cat-file -e "origin/main:$RESULT" 2>/dev/null; then exit 0; fi
-                exit 1
-              fi
-              if git push origin main; then exit 0; fi
-              sleep "$((attempt * 2))"
-            done
-            exit 1
-          fi
-          if [ -f "$RESULT" ]; then
-            echo "Result already published: $RESULT"
           else
-            echo "::error::No saved 14:30 capture or result for $DATE; cannot substitute later quotes (also check exchange holidays)."
-            exit 1
+            if [ -f "$RESULT" ]; then
+              echo "Result already published: $RESULT"
+              exit 0
+            fi
+            # A late runner is still allowed to collect today's inputs. The
+            # collector freezes the 14:00–14:30 minute window, never 'now'.
+            node scripts/collect_close_result.cjs
           fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -- "$CAPTURE" "$RESULT" data/close/index.json
+          if git diff --cached --quiet; then echo "Another runner already published $DATE"; exit 0; fi
+          git commit -m "Publish 14:30 close result $(date +%F)"
+          for attempt in 1 2 3; do
+            if ! git pull --rebase origin main; then
+              git rebase --abort >/dev/null 2>&1 || true
+              git fetch origin main
+              if git cat-file -e "origin/main:$RESULT" 2>/dev/null; then exit 0; fi
+              exit 1
+            fi
+            if git push origin main; then exit 0; fi
+            sleep "$((attempt * 2))"
+          done
+          exit 1

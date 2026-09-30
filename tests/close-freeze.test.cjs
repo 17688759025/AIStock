@@ -69,12 +69,13 @@ test('failed local minute recovery is not cached and can retry on the next refre
   await r.run('refresh()');assert.equal(r.run('attempts'),40);assert.equal(r.run('localStorage.getItem(recoveredCloseCacheKey())'),null);
 });
 
-test('invalid or late snapshots are rejected, including duplicate and unmarked picks', () => {
+test('invalid snapshots are rejected, while same-day delayed captures are accepted', () => {
   const r=runtimeAt(),f=fixture(r);
-  for(const patch of [{debug:true},{tradeDate:'2026-09-04'},{modelVersion:'old'},{selectionTime:'14:50'},{captureStartedAt:`${DATE}T14:29:59+08:00`},{captureCompletedAt:`${DATE}T14:31:00+08:00`},{captureCompletedAt:`${DATE}T14:30:00+08:00`}]){r.context.bad={...f,...patch};assert.throws(()=>r.run('validateFrozenClose(bad)'));}
+  for(const patch of [{debug:true},{tradeDate:'2026-09-04'},{modelVersion:'old'},{selectionTime:'14:50'},{captureStartedAt:`${DATE}T14:29:59+08:00`},{captureCompletedAt:`${DATE}T14:30:00+08:00`},{captureCompletedAt:`2026-09-08T00:00:00+08:00`}]){r.context.bad={...f,...patch};assert.throws(()=>r.run('validateFrozenClose(bad)'));}
   for(const picks of [[f.universes.main.picks[0],f.universes.main.picks[0]],[{...f.universes.main.picks[0],frozenClose:false}]]){r.context.bad={...f,universes:{...f.universes,main:{scannedCount:2,picks}}};assert.throws(()=>r.run('validateFrozenClose(bad)'));}
   assertCloseCaptureTime(new Date(ms('14:30:03')),DATE);
-  for(const time of ['14:29:59','14:31:00','14:50:00'])assert.throws(()=>assertCloseCaptureTime(new Date(ms(time)),DATE));
+  assertCloseCaptureTime(new Date(ms('14:50:00')),DATE);
+  assert.throws(()=>assertCloseCaptureTime(new Date(ms('14:29:59')),DATE));
 });
 
 test('close minute factors stop at 14:30 and do not overwrite the current quote', () => {
@@ -100,6 +101,8 @@ test('fresh quotes must belong to the capture minute and have actual prices', ()
   const row={f2:10,f3:1,f18:9,f124:ms('14:30:10')/1000};assert.equal(freshQuote(row,DATE),true);
   for(const patch of [{f124:ms('14:29:59')/1000},{f124:ms('14:31:00')/1000},{f3:'-'},{f2:0},{f18:0}])assert.equal(freshQuote({...row,...patch},DATE),false);
   assert.equal(freshQuote(row,'2026-09-08'),false);
+  assert.equal(freshQuote({...row,f124:ms('22:30:00')/1000},DATE,false,true),true);
+  assert.equal(freshQuote({...row,f124:Date.parse('2026-09-08T00:01:00+08:00')/1000},DATE,false,true),false);
 });
 
 test('input collector requotes source candidates inside capture minute and records missing anomalies', async () => {
@@ -129,6 +132,9 @@ test('collector uses unchanged close weights, freezes both scopes and permits gr
   assert.deepEqual(plain(r.run('CLOSE_WEIGHTS')),{flow:32,flowRatio:13,grab:20,volume:15,trend:10,continuity:5,speed:2,sector:3});
   assert.equal(result.universes.main.scannedCount,10);assert.equal(result.universes.all.scannedCount,12);assert.equal(result.universes.main.picks.length,5);
   assert.ok(result.universes.main.picks.every(s=>s.frozenClose&&s.currentChange===-1&&s.mainFlow>0));
+  const late=await buildCloseResult(r,inputs,{...meta,captureMode:'late-recovery'});
+  assert.equal(late.recoveredLate,true);
+  assert.ok(late.universes.main.picks.every(s=>Math.abs(s.snapshotPrice-102.1)<1e-9&&Math.abs(s.snapshotChange-2.1)<1e-9&&s.snapshotBasis==='14:00–14:30分钟线'));
   r.context.result={...plain(result),snapshotId:'built-fixture'};assert.doesNotThrow(()=>r.run('validateFrozenClose(result)'));
   const empty=await buildCloseResult(r,{...inputs,rows:inputs.rows.map(s=>({...s,mainFlow:-1,bigBuyCount:0}))},meta);assert.equal(empty.universes.main.picks.length,0);
   r.run('loadWindow=async()=>{throw Error("minute API offline")}');await assert.rejects(()=>buildCloseResult(r,inputs,meta),/minute data unavailable/);

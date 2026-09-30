@@ -12,8 +12,8 @@ test('close capture has seven independent starts and enough time for early wait'
  assert.ok(s.includes('git restore --source=origin/main --worktree -- "$target"'));
  assert.ok(s.includes('if: always()'));
 });
-test('close rescue runs after collection and on four retry schedules; missing input fails',()=>{
+test('close rescue runs after collection and keeps retrying through local midnight',()=>{
  const s=read('close-score-rescue.yml');
- for(const text of ['35,45,55 6 * * 1-5','15 7 * * 1-5',"workflows: ['Close snapshot collector']",'types: [completed]','--score-only','::error::No saved 14:30'])assert.ok(s.includes(text));
+ for(const text of ['35,45,55 6 * * 1-5','15 7 * * 1-5','*/30 7-15 * * 1-5','50 15 * * 1-5',"workflows: ['Close snapshot collector']",'types: [completed]','--score-only','node scripts/collect_close_result.cjs'])assert.ok(s.includes(text));
  assert.ok(s.includes("github.event.workflow_run.head_branch == 'main'"));
 });
